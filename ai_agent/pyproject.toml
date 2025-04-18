@@ -1,0 +1,32 @@
+[project]
+name = "ai-agent-larn"
+version = "0.1.0"
+description = "AIエージェントと言語モデル学習リポジトリ"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "langchain",
+    "langchain-core",
+    "langchain-openai",
+    "langchain-community",
+    "langchain-anthropic",
+    "openai",
+    "langgraph>=0.0.38",
+    "python-dotenv>=1.1.0",
+    "qdrant-client",
+    "tiktoken",
+    "neo4j>=5.28.1",
+    "duckduckgo-search",
+    "langchain-anthropic>=0.3.10",
+    "langchain-google-genai>=2.1.2",
+    "slack-sdk",
+    "boto3",
+    "notion-client",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "mypy",
+    "pytest",
+]

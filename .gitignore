@@ -1,3 +1,8 @@
 .env
 
+# python
+ai_agent/.venv
+ai_agent/__pycache__
+
+# slack bot
 slack_bot/config/config.yml
