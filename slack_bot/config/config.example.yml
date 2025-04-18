@@ -1,0 +1,3 @@
+slack_bot:
+  bot_token: xoxb-your-bot-token-here
+  app_token: xapp-your-app-token-here
