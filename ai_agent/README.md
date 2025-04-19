@@ -4,7 +4,6 @@
 
 ## 機能概要
 
-- Slackメンションの受信と処理
 - LangChainとLangGraphを使用したMCPアーキテクチャの実装
 - ElasticMQを使用した非同期メッセージ処理
 - Notionへのタスク自動作成機能
@@ -14,9 +13,10 @@
 
 システムは以下のコンポーネントで構成されています：
 
-1. **MCP Client**: ElasticMQキューからメッセージをポーリングし、処理を行うコンポーネント
-2. **MCP Server**: LangGraphを使用してメッセージ分析とレスポンス生成を行うコンポーネント
-3. **Services**:
+1. **Go Slack Bot**: Slackからのメンションを受信し、ElasticMQキューに追加するコンポーネント
+2. **MCP Client**: ElasticMQキューからメッセージをポーリングし、処理を行うコンポーネント
+3. **MCP Server**: LangGraphを使用してメッセージ分析とレスポンス生成を行うコンポーネント
+4. **Services**:
    - SlackService: Slack APIとの通信を担当
    - NotionService: Notion APIとの通信を担当
    - QueueService: ElasticMQとの通信を担当
@@ -34,13 +34,18 @@ flowchart TB
 
     subgraph "AI-Slack-Bot"
         subgraph "Infrastructure"
-            API[FastAPI Service]
             SQS[(ElasticMQ)]
             DB[(MySQL)]
             DDB[(DynamoDB)]
         end
         
-        subgraph "AI Agent"
+        subgraph "Go Slack Bot"
+            SlackHandler[Socket Mode Handler]
+            QueuePublisher[SQS Publisher]
+        end
+        
+        subgraph "Python AI Agent"
+            API[FastAPI Service]
             Client[MCP Client]
             Server[MCP Server]
             LGraph[LangGraph Flow]
@@ -53,16 +58,18 @@ flowchart TB
         end
     end
     
-    Slack <--> SS
+    Slack <--> SlackHandler
+    SlackHandler --> QueuePublisher
+    QueuePublisher --> SQS
+    
+    Client <--> SQS
+    Client --> Server
+    
     Notion <--> NS
     OpenAI <--> Server
     Anthropic <--> Server
     
-    API --> Client
     API --> Server
-    
-    Client <--> SQS
-    Client --> Server
     
     Server --> LGraph
     Server <--> SS
@@ -79,11 +86,13 @@ flowchart TB
     class SS,NS,QS service;
     class API,SQS,DB,DDB infrastructure;
     class Client,Server,LGraph core;
+    class SlackHandler,QueuePublisher slackbot;
     
     classDef external fill:#f9f,stroke:#333,stroke-width:2px;
     classDef service fill:#bbf,stroke:#33f,stroke-width:1px;
     classDef infrastructure fill:#bfb,stroke:#3f3,stroke-width:1px;
     classDef core fill:#fbb,stroke:#f33,stroke-width:1px;
+    classDef slackbot fill:#fcb,stroke:#f83,stroke-width:1px;
 ```
 
 ## セットアップ方法
@@ -154,27 +163,29 @@ POST /process-directly
 
 ## 処理フロー
 
-1. Slackからのメンションを受け取る
-2. メンションの内容をLLMで分析
-3. 適切な応答を生成
-4. 必要に応じてNotionにタスクを作成
-5. Slackに応答を返す
+1. Goで実装されたSlack Botがメンションを受け取る
+2. メンションデータをElasticMQキューに追加
+3. PythonのMCP Clientがキューからメッセージを取得
+4. MCP Serverがメンションの内容をLLMで分析
+5. 適切な応答を生成
+6. 必要に応じてNotionにタスクを作成
+7. Slackに応答を返す
 
 ### シーケンス図
 
 ```mermaid
 sequenceDiagram
     participant Slack
-    participant API as FastAPI
+    participant GoBot as Go Slack Bot
     participant Queue as ElasticMQ
-    participant MCP as MCP Client
+    participant MCP as Python MCP Client
     participant Server as MCP Server
     participant LLM as LangGraph Flow
     participant NotionAPI as Notion API
     
-    Slack->>API: メンションを送信
-    API->>Queue: タスクをキューに追加
-    API-->>Slack: 受付確認の応答
+    Slack->>GoBot: メンションを送信
+    GoBot->>Queue: タスクをキューに追加
+    GoBot-->>Slack: 初期応答（オプション）
     
     loop ポーリング処理
         MCP->>Queue: メッセージを取得
@@ -229,6 +240,22 @@ flowchart LR
     style EvaluateNotion fill:#bbf,stroke:#33f,stroke-width:1px
     style CreateNotion fill:#fbb,stroke:#f33,stroke-width:1px
 ```
+
+## コンポーネント連携
+
+### Go Slack Bot
+
+- Slackとの連携に[slack-go/slack](https://github.com/slack-go/slack)を使用
+- Socket Mode APIを使用してメンションイベントをリアルタイムに受信
+- メンションデータをElasticMQキューに追加
+- AWS SDKを使用してSQSと連携
+
+### Python AI Agent
+
+- ElasticMQからメッセージを非同期でポーリング
+- LangChainとLangGraphを使用した柔軟なメッセージ処理パイプライン
+- LLMを使った高度なコンテキスト分析
+- FastAPIによるREST APIの提供
 
 ## 開発ガイド
 

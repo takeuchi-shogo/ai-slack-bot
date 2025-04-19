@@ -1,10 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/sqs"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
@@ -67,7 +72,6 @@ func main() {
 }
 
 func handleAppMention(evt *slackevents.AppMentionEvent, client *slack.Client) {
-
 	// メッセージのメタデータとコンテンツを表示
 	fmt.Printf("メンション情報:\n")
 	fmt.Printf("  チャンネル: %s\n", evt.Channel)
@@ -76,13 +80,73 @@ func handleAppMention(evt *slackevents.AppMentionEvent, client *slack.Client) {
 	fmt.Printf("  スレッドタイムスタンプ: %s\n", evt.ThreadTimeStamp)
 	fmt.Printf("  メッセージテキスト: %s\n", evt.Text)
 
-	// スレッドに返信
-	_, _, err := client.PostMessage(evt.Channel,
-		slack.MsgOptionText(fmt.Sprintf("<@%s> メンションを受け取りました！", evt.User), false),
+	// ElasticMQにメッセージを送信
+	err := sendToElasticMQ(evt)
+	if err != nil {
+		fmt.Printf("ElasticMQへの送信エラー: %v\n", err)
+	}
+
+	// スレッドに初期返信
+	_, _, err = client.PostMessage(evt.Channel,
+		slack.MsgOptionText(fmt.Sprintf("<@%s> メンションを受け取りました。処理中です...", evt.User), false),
 		slack.MsgOptionTS(evt.ThreadTimeStamp),
 	)
 
 	if err != nil {
 		fmt.Printf("返信エラー: %v\n", err)
 	}
+}
+
+// ElasticMQにメッセージを送信する関数
+func sendToElasticMQ(evt *slackevents.AppMentionEvent) error {
+	// 設定を取得
+	cfg, err := config.NewAppConfig()
+	if err != nil {
+		return fmt.Errorf("設定読み込みエラー: %w", err)
+	}
+
+	// AWS SDKの設定
+	sess, err := session.NewSession(&aws.Config{
+		Region:   aws.String(cfg.ElasticMQ.Region),
+		Endpoint: aws.String(cfg.ElasticMQ.Endpoint),
+		Credentials: credentials.NewStaticCredentials(
+			cfg.ElasticMQ.AccessKey,
+			cfg.ElasticMQ.SecretKey,
+			"", // トークン
+		),
+	})
+	if err != nil {
+		return fmt.Errorf("AWSセッション作成エラー: %w", err)
+	}
+
+	// SQSクライアントの作成
+	svc := sqs.New(sess)
+
+	// メッセージ内容の作成
+	messageBody, err := json.Marshal(map[string]string{
+		"text":       evt.Text,
+		"user":       evt.User,
+		"channel":    evt.Channel,
+		"ts":         evt.TimeStamp,
+		"thread_ts":  evt.ThreadTimeStamp,
+		"source":     "slack",
+	})
+	if err != nil {
+		return fmt.Errorf("JSONエンコードエラー: %w", err)
+	}
+
+	// キューURLの構築
+	queueURL := fmt.Sprintf("%s/queue/%s", cfg.ElasticMQ.Endpoint, cfg.ElasticMQ.QueueName)
+
+	// メッセージ送信
+	_, err = svc.SendMessage(&sqs.SendMessageInput{
+		QueueUrl:    aws.String(queueURL),
+		MessageBody: aws.String(string(messageBody)),
+	})
+	if err != nil {
+		return fmt.Errorf("SQS送信エラー: %w", err)
+	}
+
+	fmt.Printf("メッセージを%sのキュー%sに送信しました\n", cfg.ElasticMQ.Endpoint, cfg.ElasticMQ.QueueName)
+	return nil
 }

@@ -1,28 +1,52 @@
 package config
 
-import "github.com/spf13/viper"
+import (
+	"fmt"
+
+	"github.com/spf13/viper"
+)
 
 type AppConfig struct {
-	SlackBot struct {
-		BotToken string `mapstructure:"bot_token"`
-		AppToken string `mapstructure:"app_token"`
-	} `mapstructure:"slack_bot"`
+	SlackBot  SlackBotConfig  `mapstructure:"slack_bot"`
+	ElasticMQ ElasticMQConfig `mapstructure:"elasticmq"`
+}
+
+type SlackBotConfig struct {
+	BotToken string `mapstructure:"bot_token"`
+	AppToken string `mapstructure:"app_token"`
+}
+
+type ElasticMQConfig struct {
+	Endpoint  string `mapstructure:"endpoint"`
+	QueueName string `mapstructure:"queue_name"`
+	Region    string `mapstructure:"region"`
+	AccessKey string `mapstructure:"access_key"`
+	SecretKey string `mapstructure:"secret_key"`
 }
 
 func NewAppConfig() (*AppConfig, error) {
-	viper.SetConfigName("config")
-	viper.SetConfigType("yml")
-	// viper.AddConfigPath(".")
-	viper.AddConfigPath("./config")
+	v := viper.New()
+	v.SetConfigName("config")
+	v.SetConfigType("yml")
+	v.AddConfigPath("./config")
+	v.AddConfigPath("./slack_bot/config")
 
-	if err := viper.ReadInConfig(); err != nil {
-		return nil, err
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("設定ファイルの読み込みに失敗しました: %w", err)
 	}
 
-	cfg := &AppConfig{}
-	if err := viper.Unmarshal(cfg); err != nil {
-		return nil, err
+	var config AppConfig
+	if err := v.Unmarshal(&config); err != nil {
+		return nil, fmt.Errorf("設定ファイルのパースに失敗しました: %w", err)
 	}
 
-	return cfg, nil
+	// 必須項目の検証
+	if config.SlackBot.BotToken == "" {
+		return nil, fmt.Errorf("Slack Bot Token (slack_bot.bot_token) が設定されていません")
+	}
+	if config.SlackBot.AppToken == "" {
+		return nil, fmt.Errorf("Slack App Token (slack_bot.app_token) が設定されていません")
+	}
+
+	return &config, nil
 }

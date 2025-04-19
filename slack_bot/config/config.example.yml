@@ -1,3 +1,10 @@
 slack_bot:
-  bot_token: xoxb-your-bot-token-here
-  app_token: xapp-your-app-token-here
+  bot_token: "xoxb-your-token"  # Bot User OAuth Token
+  app_token: "xapp-your-token"  # App-Level Token
+
+elasticmq:
+  endpoint: "http://localhost:9324"  # ElasticMQエンドポイント
+  queue_name: "slack-mentions"       # キュー名
+  region: "us-east-1"                # リージョン（ローカルでは任意）
+  access_key: "dummy"                # ローカルでのダミーキー
+  secret_key: "dummy"                # ローカルでのダミーキー
