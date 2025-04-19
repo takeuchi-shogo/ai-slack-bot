@@ -133,6 +133,42 @@ async def process_directly(
         raise HTTPException(
             status_code=500, detail=f"Error in direct processing: {str(e)}"
         )
+        
+@app.post("/process-with-mcp")
+async def process_with_mcp(
+    mention: MentionRequest, server: MCPServer = Depends(get_mcp_server)
+):
+    """
+    MCPツールを使用してメンションを直接処理するエンドポイント
+
+    Args:
+        mention: Slackからのメンションデータ
+        server: MCPサーバー
+
+    Returns:
+        処理結果
+    """
+    try:
+        # メンションタスクを作成
+        task = MentionTask(
+            source=MentionSource.SLACK,
+            text=mention.text,
+            user=mention.user,
+            channel=mention.channel,
+            ts=mention.ts,
+            thread_ts=mention.thread_ts,
+        )
+
+        # MCPツールで処理を実行
+        result = await server.process_with_mcp(task)
+
+        return result
+
+    except Exception as e:
+        logger.error(f"Error in MCP processing: {e}")
+        raise HTTPException(
+            status_code=500, detail=f"Error in MCP processing: {str(e)}"
+        )
 
 
 async def start_background_tasks():

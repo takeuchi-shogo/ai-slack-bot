@@ -1,10 +1,11 @@
 import json
 import logging
-from typing import Any, Dict, TypedDict
+from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain.prompts import ChatPromptTemplate, PromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 from langchain_anthropic import ChatAnthropicMessages
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 
@@ -23,6 +24,7 @@ class AgentState(TypedDict):
     notion_task: NotionTask
     error: str
     final_result: Dict[str, Any]
+    tools: List[Any]
 
 
 # MCPサーバーで実行するLLMグラフ
@@ -40,8 +42,58 @@ class MCPServer:
 
         self.gpt4 = ChatOpenAI(model="gpt-4-turbo-preview", temperature=0.2)
 
+        # MCPツールの設定
+        self.tools = self._register_mcp_tools()
+
         # LangGraphの構築
         self.graph = self._build_graph()
+
+    def _register_mcp_tools(self):
+        """MCP用のツールを登録する"""
+
+        @tool("create_notion_task")
+        def create_notion_task(
+            title: str, description: str, steps: List[str], slack_url: str
+        ) -> str:
+            """
+            Notionにタスクを作成する
+
+            Args:
+                title: タスクのタイトル
+                description: タスクの説明
+                steps: タスク完了のためのステップ（リスト形式）
+                slack_url: 関連するSlackスレッドURL
+
+            Returns:
+                作成されたタスクのID
+            """
+            task = NotionTask(
+                title=title, description=description, steps=steps, slack_url=slack_url
+            )
+
+            task_id = self.notion_service.create_task(task)
+            return f"Task created with ID: {task_id}"
+
+        @tool("reply_to_slack")
+        def reply_to_slack(
+            channel: str, text: str, thread_ts: Optional[str] = None
+        ) -> str:
+            """
+            Slackにメッセージを返信する
+
+            Args:
+                channel: チャンネルID
+                text: 送信するテキスト
+                thread_ts: スレッドのタイムスタンプ（オプション）
+
+            Returns:
+                送信結果
+            """
+            result = self.slack_service.send_message(channel, text, thread_ts)
+            return "Message sent successfully" if result else "Failed to send message"
+
+        # ツールを登録して返す
+        return [create_notion_task, reply_to_slack]
 
     def _build_graph(self) -> StateGraph:
         """LangGraphを構築する"""
@@ -396,9 +448,194 @@ class MCPServer:
             notion_task=NotionTask(title="", description="", steps=[], slack_url=""),
             error="",
             final_result={},
+            tools=self.tools,
         )
 
         # グラフを実行
         result = await self.graph.ainvoke(initial_state)
 
         return result["final_result"]
+
+    async def process_with_mcp(self, task: MentionTask) -> Dict[str, Any]:
+        """
+        MCPツールを使用してタスクを直接処理する
+
+        Args:
+            task: 処理するタスク
+
+        Returns:
+            処理結果
+        """
+        try:
+            # メッセージ内容の分析
+            analysis_prompt = PromptTemplate.from_template(
+                """
+                あなたは、Slackのメンションを分析するAIアシスタントです。
+                以下のメンションの内容を分析し、適切な対応を決定してください。
+                
+                # メンション内容
+                {text}
+                
+                # 分析の手順
+                1. メンションの意図や要求を理解する
+                2. 対応が必要かどうかを判断する
+                3. Notion追加タスクとして詳細な調査や対応が必要かを判断する
+                
+                # 回答形式
+                回答は以下の2つの部分から構成されます：
+                1. Slackへの返信内容 - ユーザーに直接返信する内容（簡潔に）
+                2. 後続アクションの要否 - NotionにタスクとしてトラッキングすべきかどうかのTrue/False
+                
+                出力形式：
+                ```
+                回答: [Slackへの返信内容]
+                要フォローアップ: [True/False]
+                ```
+                """
+            )
+
+            analysis_chain = analysis_prompt | self.claude | StrOutputParser()
+            analysis_result = await analysis_chain.ainvoke({"text": task.text})
+
+            # 結果のパース
+            lines = analysis_result.strip().split("\n")
+            content = ""
+            requires_follow_up = False
+
+            for line in lines:
+                if line.startswith("回答:"):
+                    content = line.replace("回答:", "").strip()
+                elif line.startswith("要フォローアップ:"):
+                    follow_up_text = (
+                        line.replace("要フォローアップ:", "").strip().lower()
+                    )
+                    requires_follow_up = follow_up_text == "true"
+
+            analysis = TaskAnalysisResult(
+                content=content, requires_follow_up=requires_follow_up
+            )
+
+            # ツール定義をJSON形式に変換
+            tools_json = json.dumps(
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": tool.name,
+                            "description": tool.description,
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    p: {
+                                        "type": "string" if p != "steps" else "array",
+                                        "items": {"type": "string"}
+                                        if p == "steps"
+                                        else None,
+                                    }
+                                    for p in tool.args
+                                },
+                                "required": [p for p in tool.args if p != "thread_ts"],
+                            },
+                        },
+                    }
+                    for tool in self.tools
+                ]
+            )
+
+            # Slackへの返信を実行
+            thread_ts = task.thread_ts or task.ts
+            reply_result = await self.slack_service.send_message(
+                channel=task.channel, text=analysis.content, thread_ts=thread_ts
+            )
+
+            logger.info(f"Slack reply result: {reply_result}")
+
+            result = {
+                "task_id": task.id,
+                "success": True,
+                "slack_response_sent": reply_result,
+                "notion_task_created": False,
+            }
+
+            # Notionタスクが必要な場合
+            if analysis.requires_follow_up:
+                # Slackメッセージへのリンクを取得
+                slack_url = (
+                    self.slack_service.get_permalink(task.channel, task.ts) or ""
+                )
+
+                # タスク作成プロンプト
+                task_prompt = PromptTemplate.from_template(
+                    """
+                    あなたは、SlackメッセージからNotionタスクを作成するAIアシスタントです。
+                    
+                    # メンション内容
+                    {text}
+                    
+                    # 分析結果
+                    {analysis}
+                    
+                    # 指示
+                    以下の形式でNotionタスクの内容を生成してください：
+                    
+                    1. タイトル: タスクの簡潔なタイトル（80文字以内）
+                    2. 説明: タスクの詳細な説明（背景、目的、問題点など）
+                    3. 手順: タスク完了のための具体的なステップ（箇条書きで5つ程度）
+                    
+                    # 出力形式
+                    ```json
+                    {
+                      "title": "タスクのタイトル",
+                      "description": "タスクの詳細な説明",
+                      "steps": [
+                        "ステップ1",
+                        "ステップ2",
+                        "ステップ3",
+                        ...
+                      ]
+                    }
+                    ```
+                    """
+                )
+
+                # LLMでタスク内容を生成
+                task_chain = task_prompt | self.claude | StrOutputParser()
+                task_json_str = await task_chain.ainvoke(
+                    {"text": task.text, "analysis": analysis.content}
+                )
+
+                # JSON文字列をパース
+                try:
+                    # ```json と ``` を削除
+                    json_content = (
+                        task_json_str.replace("```json", "").replace("```", "").strip()
+                    )
+                    task_data = json.loads(json_content)
+
+                    notion_task = NotionTask(
+                        title=task_data.get("title", "無題のタスク"),
+                        description=task_data.get("description", ""),
+                        steps=task_data.get("steps", []),
+                        slack_url=slack_url,
+                    )
+
+                    # Notionにタスクを作成
+                    task_id = await self.notion_service.create_task(notion_task)
+                    logger.info(f"Notion task created with ID: {task_id}")
+
+                    # 結果を更新
+                    result["notion_task_created"] = True
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Error parsing task JSON: {e}")
+                    result["error"] = f"Notion task creation failed: {str(e)}"
+
+            return result
+
+        except Exception as e:
+            logger.error(f"Error in process_with_mcp: {e}")
+            return {
+                "task_id": task.id,
+                "success": False,
+                "error": str(e),
+            }
