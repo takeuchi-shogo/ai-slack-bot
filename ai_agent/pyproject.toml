@@ -22,6 +22,8 @@ dependencies = [
     "slack-sdk",
     "boto3",
     "notion-client",
+    "pydantic",
+    "pydantic-settings",
 ]
 
 [project.optional-dependencies]

@@ -7,5 +7,9 @@
     },
     "editor.defaultFormatter": "charliermarsh.ruff"
   },
+  "python.analysis.extraPaths": [
+    "/Users/takeuchishougo/dev-app/ai-agent/.venv/lib/python3.13/site-packages"
+  ],
+  "python.analysis.inlayHints.functionReturnTypes": true,
   "python.analysis.inlayHints.variableTypes": true,
 }

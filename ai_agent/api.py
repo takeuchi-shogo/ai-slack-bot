@@ -133,7 +133,8 @@ async def process_directly(
         raise HTTPException(
             status_code=500, detail=f"Error in direct processing: {str(e)}"
         )
-        
+
+
 @app.post("/process-with-mcp")
 async def process_with_mcp(
     mention: MentionRequest, server: MCPServer = Depends(get_mcp_server)
