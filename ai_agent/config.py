@@ -7,6 +7,7 @@ class Settings(BaseSettings):
 
     PORT: int = Field(default=8080)
     DEBUG: bool = Field(default=False)
+    TEST_MODE: bool = Field(default=False)
 
     # LLM API Keys
     ANTHROPIC_API_KEY: str
@@ -27,8 +28,16 @@ class Settings(BaseSettings):
     SQS_ENDPOINT: str = Field(default="http://localhost:9324")
     SQS_QUEUE_NAME: str = Field(default="slack-mentions")
 
+    # LangSmith設定
+    LANGSMITH_TRACING: bool = Field(default=False)
+    LANGSMITH_ENDPOINT: str = Field(default="https://api.smith.langchain.com")
+    LANGSMITH_API_KEY: str = Field(default="")
+    LANGSMITH_PROJECT: str = Field(default="ai-agent")
+
     class Config:
         env_file = ".env"
+        # 大文字小文字を区別しない（.envファイルの変数名が小文字でも読み込める）
+        case_sensitive = False
 
 
 settings = Settings()

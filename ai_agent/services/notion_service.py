@@ -21,9 +21,31 @@ class NotionService:
         notion_api_key = os.getenv("NOTION_API_KEY", settings.NOTION_API_KEY)
         self.database_id = os.getenv("NOTION_DATABASE_ID", settings.NOTION_DATABASE_ID)
 
+        # データベースIDの正規化（ハイフンの有無を許容）
+        if self.database_id:
+            # ハイフンを削除したIDを取得
+            self.database_id_no_hyphens = self.database_id.replace("-", "")
+            # 長さに基づいて正しいフォーマットを推測
+            if len(self.database_id) < 36 and len(self.database_id_no_hyphens) == 32:
+                # ハイフンなしの32文字IDをUUID形式に変換
+                formatted_id = f"{self.database_id_no_hyphens[:8]}-{self.database_id_no_hyphens[8:12]}-{self.database_id_no_hyphens[12:16]}-{self.database_id_no_hyphens[16:20]}-{self.database_id_no_hyphens[20:]}"
+                logger.info(f"データベースIDをUUID形式に変換しました: {formatted_id}")
+                self.database_id = formatted_id
+
+            logger.info(f"使用するNotion Database ID: {self.database_id}")
+            logger.info(f"ハイフンなし形式のID: {self.database_id_no_hyphens}")
+
         # テストモードでなければクライアントを初期化
         if not self.test_mode and notion_api_key:
             self.client = Client(auth=notion_api_key)
+            # クライアントの初期化成功を確認
+            try:
+                # APIが機能するか確認
+                self.client.users.me()
+                logger.info("Notion APIに正常に接続しました")
+            except Exception as e:
+                logger.error(f"Notion API接続エラー: {e}")
+                self.client = None
         else:
             self.client = None
             if not self.test_mode:
@@ -53,13 +75,58 @@ class NotionService:
             logger.error("Notionクライアントが初期化されていません")
             return None
 
+        # Slack URLが空の場合、デフォルト値を設定
+        slack_url = task.slack_url
+        if not slack_url:
+            slack_url = "https://slack.com"
+            logger.warning("Slack URLが空のため、デフォルト値を使用します")
+
         try:
+            # まずハイフン付きの形式で試す
+            return await self._try_create_page(task, slack_url, self.database_id)
+        except Exception as e:
+            logger.warning(f"ハイフン付きIDでの作成に失敗しました: {e}")
+
+            # 失敗したらハイフンなしの形式で試す
+            try:
+                if hasattr(self, "database_id_no_hyphens"):
+                    logger.info(
+                        f"ハイフンなしIDで再試行: {self.database_id_no_hyphens}"
+                    )
+                    return await self._try_create_page(
+                        task, slack_url, self.database_id_no_hyphens
+                    )
+                else:
+                    logger.error("ハイフンなしIDが設定されていません")
+                    return None
+            except Exception as e2:
+                logger.error(f"ハイフンなしIDでも失敗しました: {e2}")
+                return None
+
+    async def _try_create_page(
+        self, task: NotionTask, slack_url: str, db_id: str
+    ) -> Optional[str]:
+        """
+        指定されたデータベースIDでページ作成を試みる
+
+        Args:
+            task: 作成するタスク情報
+            slack_url: SlackのURL
+            db_id: 使用するデータベースID
+
+        Returns:
+            作成されたページID、失敗した場合はNone
+        """
+        try:
+            # データベースIDの使用をログに記録
+            logger.info(f"Notion DB ID '{db_id}' でページ作成を試みます")
+
             # タスクをNotionページとして作成
             page = self.client.pages.create(
-                parent={"database_id": self.database_id},
+                parent={"database_id": db_id},
                 properties={
                     "タイトル": {"title": [{"text": {"content": task.title}}]},
-                    "ステータス": {"select": {"name": "未対応"}},
+                    "ステータス": {"status": {"name": "未着手"}},
                 },
                 children=[
                     {
@@ -119,8 +186,8 @@ class NotionService:
                                 {
                                     "type": "text",
                                     "text": {
-                                        "content": task.slack_url,
-                                        "link": {"url": task.slack_url},
+                                        "content": slack_url,
+                                        "link": {"url": slack_url},
                                     },
                                 },
                             ]
@@ -129,8 +196,11 @@ class NotionService:
                 ],
             )
 
-            return page.get("id")
+            page_id = page.get("id")
+            logger.info(f"Notionにタスクを作成しました: {task.title}, ID: {page_id}")
+            return page_id
 
         except Exception as e:
-            logger.error(f"Error creating task in Notion: {e}")
-            return None
+            logger.error(f"Notion ページ作成エラー (DB ID: {db_id}): {e}")
+            # 例外を伝播させる
+            raise

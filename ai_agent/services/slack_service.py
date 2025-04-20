@@ -36,6 +36,11 @@ class SlackService:
         Returns:
             送信成功の場合True
         """
+        # テキストが空かNoneの場合はデフォルトテキストを使用
+        if not text:
+            text = "申し訳ありませんが、メッセージを生成できませんでした。"
+            logger.warning("送信テキストが空のため、デフォルトテキストを使用します")
+
         # テストモードの場合はメッセージをログに出力するだけ
         if self.test_mode:
             logger.info(

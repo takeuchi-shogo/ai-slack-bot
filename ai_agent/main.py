@@ -1,11 +1,11 @@
 import asyncio
 import logging
-import os
 import signal
 from typing import Any, Dict
 
 from agents.mcp_client import MCPClient
 from agents.mcp_server import MCPServer
+from config import settings
 from dotenv import load_dotenv
 from models import MentionSource, MentionTask
 from services.queue_service import QueueService
@@ -19,12 +19,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# テストモードかどうかを確認
+TEST_MODE = settings.TEST_MODE
+if TEST_MODE:
+    logger.info("テストモードで実行します")
+
 # サービスインスタンスの初期化
 mcp_server = MCPServer()
 mcp_client = MCPClient()
-
-# テストモードかどうかを確認
-TEST_MODE = os.getenv("TEST_MODE", "False").lower() in ("true", "1", "t")
 
 # ElasticMQが必要かどうかを確認（テストモードでは不要）
 if not TEST_MODE:
@@ -153,28 +155,29 @@ async def main():
     # ElasticMQポーリングを開始（テストモードでなければ）
     elasticmq_poller = asyncio.create_task(poll_elasticmq())
 
-    # テスト用のメンションデータ
-    test_mention = {
-        "text": "こんにちは、プロジェクトのログイン機能にバグがあるようです。認証後にリダイレクトが正しく動作していません。",
-        "user": "U01234ABC",
-        "channel": "C01234XYZ",
-        "ts": "1617262456.000200",
-    }
-
-    # テストモードまたは開発環境でのみテスト実行
-    if TEST_MODE or __debug__:
+    # テストモードの場合のみテスト実行
+    if TEST_MODE:
         logger.info("テストモードで実行中: サンプルメンションを処理します")
+
+        # テスト用のメンションデータ
+        test_mention = {
+            "text": "こんにちは、プロジェクトのログイン機能にバグがあるようです。認証後にリダイレクトが正しく動作していません。",
+            "user": "U01234ABC",
+            "channel": "general",
+            "ts": "1617262456.000200",
+        }
+
+        # テスト実行
         response = await process_mention(test_mention)
         logger.info(f"Test response: {response}")
 
+        # テストモードでは終了
+        logger.info("テストが完了しました。終了します。")
+        return
+
     try:
         # テストモードでなければポーリングタスクが終了するまで待機
-        if not TEST_MODE:
-            await elasticmq_poller
-        else:
-            # テストモードでは終了
-            logger.info("テストが完了しました。終了します。")
-            return
+        await elasticmq_poller
     except asyncio.CancelledError:
         logger.info("ElasticMQ poller was cancelled")
 

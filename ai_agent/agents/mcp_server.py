@@ -155,6 +155,9 @@ class MCPServer:
             chain = prompt | self.claude | StrOutputParser()
             analysis_result = await chain.ainvoke({"text": task.text})
 
+            # 分析結果を詳細にログ記録
+            logger.info(f"分析結果 (analyze_intent): {analysis_result}")
+
             # 分析結果を記録
             return {
                 **state,
@@ -180,6 +183,16 @@ class MCPServer:
             task = state["task"]
             analysis = state["analysis"]
 
+            # 分析結果が空の場合はデフォルトの分析結果を使用
+            analysis_content = analysis.content
+            if not analysis_content:
+                analysis_content = "テキストの分析結果はありません。"
+                logger.warning("分析結果が空のため、デフォルト値を使用します")
+
+            # 入力データのログ
+            logger.info(f"generate_slack_response 入力 - text: {task.text}")
+            logger.info(f"generate_slack_response 入力 - analysis: {analysis_content}")
+
             # 応答生成プロンプト
             prompt = PromptTemplate.from_template(
                 """
@@ -204,8 +217,11 @@ class MCPServer:
             # LLMで応答を生成
             chain = prompt | self.gpt4 | StrOutputParser()
             response = await chain.ainvoke(
-                {"text": task.text, "analysis": analysis.content, "user": task.user}
+                {"text": task.text, "analysis": analysis_content, "user": task.user}
             )
+
+            # 応答のログ記録
+            logger.info(f"生成された応答: {response}")
 
             # 応答を記録
             return {**state, "slack_response": response}
@@ -501,8 +517,16 @@ class MCPServer:
             content = ""
             requires_follow_up = False
 
+            # 分析結果のログ出力
+            logger.info(f"LLM分析結果: {analysis_result}")
+
+            # 「回答:」が見つからない場合は全体を回答とみなす
+            found_answer_prefix = False
+            full_analysis = analysis_result  # 完全な分析結果を保存
+
             for line in lines:
                 if line.startswith("回答:"):
+                    found_answer_prefix = True
                     content = line.replace("回答:", "").strip()
                 elif line.startswith("要フォローアップ:"):
                     follow_up_text = (
@@ -510,9 +534,70 @@ class MCPServer:
                     )
                     requires_follow_up = follow_up_text == "true"
 
+            content = analysis_result
+            # 「回答:」プレフィックスが見つからなかった場合は全体を回答として扱う
+            if not found_answer_prefix and analysis_result:
+                content = analysis_result
+                logger.warning(
+                    "「回答:」プレフィックスが見つからないため、全体を回答として使用します"
+                )
+
+            # コンテンツが空の場合はデフォルトテキストを設定
+            if not content:
+                content = f"<@{task.user}> 申し訳ありませんが、メッセージの処理中に問題が発生しました。もう一度お試しいただけますか？"
+                logger.warning(
+                    "生成されたコンテンツが空のため、デフォルトテキストを使用します"
+                )
+
             analysis = TaskAnalysisResult(
                 content=content, requires_follow_up=requires_follow_up
             )
+
+            # コンテンツが空か不十分な場合、より詳細な応答を生成する
+            if len(content.strip()) < 50 and not self.test_mode:
+                try:
+                    logger.info("コンテンツが不十分なため、より詳細な応答を生成します")
+
+                    # より詳細な応答生成プロンプト
+                    response_prompt = PromptTemplate.from_template(
+                        """
+                        あなたはSlackボットとして、以下のメンションに対する返答を生成します。
+                        
+                        # メンション内容
+                        {text}
+                        
+                        # 分析結果
+                        {analysis}
+                        
+                        # 指示
+                        1. ユーザーのメンションに対して、適切かつ簡潔な返答を生成してください
+                        2. 返答は丁寧で親しみやすい口調で、かつ専門的な知識を反映させてください
+                        3. 回答は200文字以内に収めてください
+                        4. ユーザー名は <@{user}> の形式で言及してください
+                        
+                        回答をそのまま出力してください。プロンプトの内容をそのまま含めないでください。
+                        """
+                    )
+
+                    # LLMで応答を生成
+                    response_chain = response_prompt | self.gpt4 | StrOutputParser()
+                    new_content = await response_chain.ainvoke(
+                        {
+                            "text": task.text,
+                            "analysis": full_analysis,
+                            "user": task.user,
+                        }
+                    )
+
+                    if new_content and len(new_content.strip()) > len(content.strip()):
+                        logger.info(f"新しい応答を生成しました: {new_content}")
+                        content = new_content
+                        analysis = TaskAnalysisResult(
+                            content=content, requires_follow_up=requires_follow_up
+                        )
+                except Exception as e:
+                    logger.error(f"詳細な応答生成中にエラーが発生しました: {e}")
+                    # エラーが発生しても元の応答を使用するので続行
 
             # ツール定義をJSON形式に変換
             tools_json = json.dumps(
@@ -623,7 +708,28 @@ class MCPServer:
                     logger.info(f"Notion task created with ID: {task_id}")
 
                     # 結果を更新
-                    result["notion_task_created"] = True
+                    result["notion_task_created"] = task_id is not None
+
+                    # 作成が成功した場合はSlackに通知
+                    if task_id:
+                        # タスク作成成功の通知をSlackに送信
+                        task_success_message = (
+                            f"Notionにタスクを作成しました: {notion_task.title}"
+                        )
+                        await self.slack_service.send_message(
+                            channel=task.channel,
+                            text=task_success_message,
+                            thread_ts=thread_ts,
+                        )
+                    else:
+                        # タスク作成失敗の通知
+                        task_error_message = "Notionタスクの作成に失敗しました。"
+                        await self.slack_service.send_message(
+                            channel=task.channel,
+                            text=task_error_message,
+                            thread_ts=thread_ts,
+                        )
+                        result["error"] = "Notion task creation failed"
 
                 except json.JSONDecodeError as e:
                     logger.error(f"Error parsing task JSON: {e}")
