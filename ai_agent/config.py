@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     AWS_ACCESS_KEY_ID: str = Field(default="dummy")
     AWS_SECRET_ACCESS_KEY: str = Field(default="dummy")
     AWS_REGION: str = Field(default="us-east-1")
-    SQS_ENDPOINT: str = Field(default="http://elasticmq:9324")
+    SQS_ENDPOINT: str = Field(default="http://localhost:9324")
     SQS_QUEUE_NAME: str = Field(default="slack-mentions")
 
     class Config:

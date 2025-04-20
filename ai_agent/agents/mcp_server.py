@@ -8,10 +8,9 @@ from langchain_anthropic import ChatAnthropicMessages
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
-
-from ..models import MentionTask, NotionTask, TaskAnalysisResult
-from ..services.notion_service import NotionService
-from ..services.slack_service import SlackService
+from models import MentionTask, NotionTask, TaskAnalysisResult
+from services.notion_service import NotionService
+from services.slack_service import SlackService
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +36,10 @@ class MCPServer:
 
         # LLMの初期化
         self.claude = ChatAnthropicMessages(
-            model="claude-3-opus-20240229", temperature=0.2
+            model="claude-3-5-sonnet-20241022", temperature=0.7
         )
 
-        self.gpt4 = ChatOpenAI(model="gpt-4-turbo-preview", temperature=0.2)
+        self.gpt4 = ChatOpenAI(model="gpt-3.5-turbo", temperature=0.7)
 
         # MCPツールの設定
         self.tools = self._register_mcp_tools()
@@ -321,16 +320,16 @@ class MCPServer:
                 
                 # 出力形式
                 ```json
-                {
+                {{
                   "title": "タスクのタイトル",
                   "description": "タスクの詳細な説明",
                   "steps": [
                     "ステップ1",
                     "ステップ2",
                     "ステップ3",
-                    ...
+                    "..."
                   ]
-                }
+                }}
                 ```
                 """
             )
@@ -584,16 +583,16 @@ class MCPServer:
                     
                     # 出力形式
                     ```json
-                    {
+                    {{
                       "title": "タスクのタイトル",
                       "description": "タスクの詳細な説明",
                       "steps": [
                         "ステップ1",
                         "ステップ2",
                         "ステップ3",
-                        ...
+                        "..."
                       ]
-                    }
+                    }}
                     ```
                     """
                 )

@@ -44,6 +44,9 @@ func main() {
 			case socketmode.EventTypeConnected:
 				fmt.Println("Connected to Slack!")
 			case socketmode.EventTypeEventsAPI:
+				// イベントを確認してACK（応答）を返す
+				client.Ack(*evt.Request)
+
 				log.Println("EventsAPI")
 				eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
 				if !ok {
@@ -84,17 +87,20 @@ func handleAppMention(evt *slackevents.AppMentionEvent, client *slack.Client) {
 	err := sendToElasticMQ(evt)
 	if err != nil {
 		fmt.Printf("ElasticMQへの送信エラー: %v\n", err)
+
+		// エラーが発生した場合のみSlackに返信
+		_, _, err = client.PostMessage(evt.Channel,
+			slack.MsgOptionText(fmt.Sprintf("<@%s> メッセージキューへの送信中にエラーが発生しました。", evt.User), false),
+			slack.MsgOptionTS(evt.ThreadTimeStamp),
+		)
+		if err != nil {
+			fmt.Printf("返信エラー: %v\n", err)
+		}
+		return
 	}
 
-	// スレッドに初期返信
-	_, _, err = client.PostMessage(evt.Channel,
-		slack.MsgOptionText(fmt.Sprintf("<@%s> メンションを受け取りました。処理中です...", evt.User), false),
-		slack.MsgOptionTS(evt.ThreadTimeStamp),
-	)
-
-	if err != nil {
-		fmt.Printf("返信エラー: %v\n", err)
-	}
+	// キューに正常に送信できた場合は返信しない（Pythonが処理する）
+	log.Printf("メッセージをキューに送信しました。処理はPythonに委譲します。")
 }
 
 // ElasticMQにメッセージを送信する関数
@@ -124,12 +130,12 @@ func sendToElasticMQ(evt *slackevents.AppMentionEvent) error {
 
 	// メッセージ内容の作成
 	messageBody, err := json.Marshal(map[string]string{
-		"text":       evt.Text,
-		"user":       evt.User,
-		"channel":    evt.Channel,
-		"ts":         evt.TimeStamp,
-		"thread_ts":  evt.ThreadTimeStamp,
-		"source":     "slack",
+		"text":      evt.Text,
+		"user":      evt.User,
+		"channel":   evt.Channel,
+		"ts":        evt.TimeStamp,
+		"thread_ts": evt.ThreadTimeStamp,
+		"source":    "slack",
 	})
 	if err != nil {
 		return fmt.Errorf("JSONエンコードエラー: %w", err)

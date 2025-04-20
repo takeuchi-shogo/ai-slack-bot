@@ -3,16 +3,15 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
+from config import settings
 from langchain.prompts import PromptTemplate
 from langchain.schema.output_parser import StrOutputParser
 from langchain_anthropic import ChatAnthropicMessages
 from langchain_core.tools import tool
-
-from ..config import settings
-from ..models import MentionTask, NotionTask, TaskAnalysisResult
-from ..services.notion_service import NotionService
-from ..services.queue_service import QueueService
-from ..services.slack_service import SlackService
+from models import MentionTask, NotionTask, TaskAnalysisResult
+from services.notion_service import NotionService
+from services.queue_service import QueueService
+from services.slack_service import SlackService
 
 logger = logging.getLogger(__name__)
 

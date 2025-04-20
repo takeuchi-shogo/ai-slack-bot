@@ -1,10 +1,9 @@
 import logging
-from typing import Optional
+import os
+from typing import Any, Dict, Optional
 
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
-
-from ..config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -13,30 +12,56 @@ class SlackService:
     """Slack API操作サービス"""
 
     def __init__(self):
-        self.client = WebClient(token=settings.SLACK_BOT_TOKEN)
+        # テストモードかどうかを確認
+        self.test_mode = os.getenv("TEST_MODE", "False").lower() in ("true", "1", "t")
+
+        # Slack WebClientの初期化
+        slack_token = os.getenv("SLACK_BOT_TOKEN")
+        if not slack_token:
+            logger.warning("SLACK_BOT_TOKENが設定されていません")
+
+        self.client = WebClient(token=slack_token) if slack_token else None
 
     async def send_message(
         self, channel: str, text: str, thread_ts: Optional[str] = None
     ) -> bool:
         """
-        Slackメッセージを送信する
+        Slackにメッセージを送信する
 
         Args:
-            channel: メッセージを送信するチャンネルID
-            text: 送信するテキスト
-            thread_ts: スレッドのタイムスタンプ (スレッド返信の場合)
+            channel: チャンネルID
+            text: 送信テキスト
+            thread_ts: スレッドタイムスタンプ（オプション）
 
         Returns:
-            送信成功したかどうか
+            送信成功の場合True
         """
-        try:
-            kwargs = {"channel": channel, "text": text}
-
-            if thread_ts:
-                kwargs["thread_ts"] = thread_ts
-
-            response = self.client.chat_postMessage(**kwargs)
+        # テストモードの場合はメッセージをログに出力するだけ
+        if self.test_mode:
+            logger.info(
+                f"[テストモード] Slackメッセージ - チャンネル: {channel}, スレッド: {thread_ts}"
+            )
+            logger.info(f"[テストモード] メッセージ内容: {text}")
             return True
+
+        if not self.client:
+            logger.error("Slack clientが初期化されていません")
+            return False
+
+        try:
+            # メッセージオプションの設定
+            options: Dict[str, Any] = {
+                "channel": channel,
+                "text": text,
+            }
+
+            # スレッド指定がある場合
+            if thread_ts:
+                options["thread_ts"] = thread_ts
+
+            # メッセージを送信
+            response = self.client.chat_postMessage(**options)
+            return response["ok"]
 
         except SlackApiError as e:
             logger.error(f"Error sending message to Slack: {e}")
@@ -44,21 +69,32 @@ class SlackService:
 
     def get_permalink(self, channel: str, message_ts: str) -> Optional[str]:
         """
-        メッセージのパーマリンクを取得する
+        Slackメッセージへのパーマリンクを取得する
 
         Args:
             channel: チャンネルID
-            message_ts: メッセージのタイムスタンプ
+            message_ts: メッセージタイムスタンプ
 
         Returns:
-            パーマリンクURL、取得できない場合はNone
+            パーマリンクURL、エラー時はNone
         """
+        # テストモードの場合はダミーリンクを返す
+        if self.test_mode:
+            dummy_link = (
+                f"https://slack.com/archives/{channel}/p{message_ts.replace('.', '')}"
+            )
+            logger.info(f"[テストモード] Slackパーマリンク: {dummy_link}")
+            return dummy_link
+
+        if not self.client:
+            logger.error("Slack clientが初期化されていません")
+            return None
+
         try:
             response = self.client.chat_getPermalink(
                 channel=channel, message_ts=message_ts
             )
             return response.get("permalink")
-
         except SlackApiError as e:
             logger.error(f"Error getting permalink: {e}")
             return None

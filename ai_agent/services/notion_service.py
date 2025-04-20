@@ -1,10 +1,11 @@
 import logging
+import os
+import uuid
 from typing import Optional
 
+from config import settings
+from models import NotionTask
 from notion_client import Client
-
-from ..config import settings
-from ..models import NotionTask
 
 logger = logging.getLogger(__name__)
 
@@ -13,8 +14,22 @@ class NotionService:
     """Notion API操作サービス"""
 
     def __init__(self):
-        self.client = Client(auth=settings.NOTION_API_KEY)
-        self.database_id = settings.NOTION_DATABASE_ID
+        # テストモードかどうかを確認
+        self.test_mode = os.getenv("TEST_MODE", "False").lower() in ("true", "1", "t")
+
+        # Notion設定の取得
+        notion_api_key = os.getenv("NOTION_API_KEY", settings.NOTION_API_KEY)
+        self.database_id = os.getenv("NOTION_DATABASE_ID", settings.NOTION_DATABASE_ID)
+
+        # テストモードでなければクライアントを初期化
+        if not self.test_mode and notion_api_key:
+            self.client = Client(auth=notion_api_key)
+        else:
+            self.client = None
+            if not self.test_mode:
+                logger.warning(
+                    "Notion API Keyが設定されていないため、Notionクライアントは初期化されません"
+                )
 
     async def create_task(self, task: NotionTask) -> Optional[str]:
         """
@@ -26,6 +41,18 @@ class NotionService:
         Returns:
             作成されたページID、失敗した場合はNone
         """
+        # テストモードの場合はダミーIDを返す
+        if self.test_mode:
+            dummy_id = str(uuid.uuid4())
+            logger.info(f"[テストモード] Notionタスク作成: {task.title}")
+            logger.info(f"[テストモード] タスクID: {dummy_id}")
+            return dummy_id
+
+        # クライアントが初期化されていない場合
+        if not self.client:
+            logger.error("Notionクライアントが初期化されていません")
+            return None
+
         try:
             # タスクをNotionページとして作成
             page = self.client.pages.create(
