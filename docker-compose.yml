@@ -18,6 +18,17 @@ services:
       timeout: 5s
       retries: 5
 
+  migrations:
+    build:
+      context: ./migrations
+      dockerfile: Dockerfile
+    container_name: slack-bot-migrations
+    volumes:
+      - ./migrations:/app/migrations
+    depends_on:
+      mysql:
+        condition: service_healthy
+
   elasticmq:
     image: softwaremill/elasticmq
     container_name: slack-bot-elasticmq

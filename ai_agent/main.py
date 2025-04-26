@@ -3,11 +3,13 @@ import logging
 import signal
 from typing import Any, Dict
 
+from agents.db_agent import DatabaseAgent
 from agents.mcp_client import MCPClient
 from agents.mcp_server import MCPServer
 from config import settings
 from dotenv import load_dotenv
 from models import MentionSource, MentionTask
+from services.db_service import DBService
 from services.queue_service import QueueService
 
 # 環境変数の読み込み
@@ -27,10 +29,12 @@ if TEST_MODE:
 # サービスインスタンスの初期化
 mcp_server = MCPServer()
 mcp_client = MCPClient()
+db_agent = DatabaseAgent()
 
 # ElasticMQが必要かどうかを確認（テストモードでは不要）
 if not TEST_MODE:
     queue_service = QueueService()
+    db_service = DBService()
 
 # 終了フラグ
 shutdown_flag = False
@@ -60,19 +64,56 @@ async def process_mention(mention_data: Dict[str, Any]) -> str:
         # タスクをログに記録
         logger.info(f"Processing mention from user {task.user}: {task.text}")
 
-        # MCPサーバーでタスクを処理（MCP対応版）
-        result = await mcp_server.process_with_mcp(task)
+        # DBクエリが必要かどうかを判断するための簡易チェック
+        needs_db_query = any(
+            keyword in task.text.lower()
+            for keyword in [
+                "sql",
+                "query",
+                "データベース",
+                "db",
+                "select",
+                "database",
+                "テーブル",
+            ]
+        )
 
-        # 処理結果をログに記録
-        logger.info(f"Processing result: {result}")
+        if needs_db_query:
+            # データベースエージェントでタスクを処理
+            logger.info("データベースクエリのリクエストとして処理します")
+            result = await db_agent.process(task)
 
-        # 処理成功の場合
-        if result.get("success", False):
-            return "メッセージを処理しました。"
+            # 処理結果をログに記録
+            logger.info(f"DB Agent processing result: {result}")
+
+            if result.get("success", False):
+                # DBエージェントからの応答を生成
+                query_result = result.get("query_result", {})
+
+                if query_result.get("query_modified", False):
+                    # クエリが修正された場合
+                    return f"元のクエリに問題があったため修正して実行しました。\n元クエリ: {query_result.get('original_query', '')}\n実行クエリ: {query_result.get('executed_query', '')}\n結果: {query_result.get('results', [])}"
+                else:
+                    # クエリが正常だった場合
+                    return f"クエリを実行しました。\n{query_result.get('executed_query', '')}\n結果: {query_result.get('results', [])}"
+            else:
+                error = result.get("error", "不明なエラー")
+                logger.error(f"Error in DB processing: {error}")
+                return f"データベースクエリの処理中にエラーが発生しました: {error}"
         else:
-            error = result.get("error", "不明なエラー")
-            logger.error(f"Error in processing: {error}")
-            return f"メッセージの処理中にエラーが発生しました: {error}"
+            # MCPサーバーでタスクを処理（MCP対応版）
+            result = await mcp_server.process_with_mcp(task)
+
+            # 処理結果をログに記録
+            logger.info(f"MCP processing result: {result}")
+
+            # 処理成功の場合
+            if result.get("success", False):
+                return "メッセージを処理しました。"
+            else:
+                error = result.get("error", "不明なエラー")
+                logger.error(f"Error in MCP processing: {error}")
+                return f"メッセージの処理中にエラーが発生しました: {error}"
 
     except Exception as e:
         logger.error(f"Error in process_mention: {e}")
@@ -155,11 +196,19 @@ async def main():
     # ElasticMQポーリングを開始（テストモードでなければ）
     elasticmq_poller = asyncio.create_task(poll_elasticmq())
 
+    # DBサービスの初期化（テストモードでなければ）
+    if not TEST_MODE:
+        try:
+            await db_service.initialize()
+            logger.info("DBサービスを初期化しました")
+        except Exception as e:
+            logger.error(f"DBサービスの初期化に失敗しました: {e}")
+
     # テストモードの場合のみテスト実行
     if TEST_MODE:
         logger.info("テストモードで実行中: サンプルメンションを処理します")
 
-        # テスト用のメンションデータ
+        # 標準メンションのテスト
         test_mention = {
             "text": "こんにちは、プロジェクトのログイン機能にバグがあるようです。認証後にリダイレクトが正しく動作していません。",
             "user": "U01234ABC",
@@ -169,7 +218,31 @@ async def main():
 
         # テスト実行
         response = await process_mention(test_mention)
-        logger.info(f"Test response: {response}")
+        logger.info(f"標準メンションテスト応答: {response}")
+
+        # DBクエリメンションのテスト
+        db_test_mention = {
+            "text": "ユーザーテーブルから最新の10件のレコードを取得してください。SELECT * FROM users LIMIT 10",
+            "user": "U01234ABC",
+            "channel": "database",
+            "ts": "1617262456.000300",
+        }
+
+        # DBクエリテスト実行
+        db_response = await process_mention(db_test_mention)
+        logger.info(f"DBクエリテスト応答: {db_response}")
+
+        # 不正なSQLクエリのテスト
+        invalid_query_mention = {
+            "text": "ユーザーとその注文情報を取得してください。SELECT * FORM users JOIN order ON user.id = orders.user_id",
+            "user": "U01234ABC",
+            "channel": "database",
+            "ts": "1617262456.000400",
+        }
+
+        # 不正クエリテスト実行
+        invalid_response = await process_mention(invalid_query_mention)
+        logger.info(f"不正クエリテスト応答: {invalid_response}")
 
         # テストモードでは終了
         logger.info("テストが完了しました。終了します。")
@@ -180,6 +253,14 @@ async def main():
         await elasticmq_poller
     except asyncio.CancelledError:
         logger.info("ElasticMQ poller was cancelled")
+
+    # DBサービスの終了処理（テストモードでなければ）
+    if not TEST_MODE:
+        try:
+            await db_service.close()
+            logger.info("DBサービスを終了しました")
+        except Exception as e:
+            logger.error(f"DBサービスの終了に失敗しました: {e}")
 
     logger.info("AI Agent shutting down...")
 

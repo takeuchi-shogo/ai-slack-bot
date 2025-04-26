@@ -76,7 +76,8 @@ func main() {
 
 func handleAppMention(evt *slackevents.AppMentionEvent, client *slack.Client) {
 	// メッセージのメタデータとコンテンツを表示
-	fmt.Printf("メンション情報:\n")
+	fmt.Printf("メンション情報: %+v\n", evt)
+	fmt.Printf("メンション詳細:\n")
 	fmt.Printf("  チャンネル: %s\n", evt.Channel)
 	fmt.Printf("  ユーザー: %s\n", evt.User)
 	fmt.Printf("  タイムスタンプ: %s\n", evt.TimeStamp)

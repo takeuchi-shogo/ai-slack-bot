@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     # LLM API Keys
     ANTHROPIC_API_KEY: str
     OPENAI_API_KEY: str
+    GOOGLE_API_KEY: str
 
     # Slack Integration
     SLACK_BOT_TOKEN: str
@@ -33,6 +34,13 @@ class Settings(BaseSettings):
     LANGSMITH_ENDPOINT: str = Field(default="https://api.smith.langchain.com")
     LANGSMITH_API_KEY: str = Field(default="")
     LANGSMITH_PROJECT: str = Field(default="ai-agent")
+
+    # Database設定
+    DB_HOST: str = Field(default="localhost")
+    DB_PORT: int = Field(default=3306)
+    DB_NAME: str = Field(default="slack_bot")
+    DB_USER: str = Field(default="root")
+    DB_PASSWORD: str = Field(default="")
 
     class Config:
         env_file = ".env"
