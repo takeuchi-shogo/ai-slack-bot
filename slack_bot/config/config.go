@@ -4,6 +4,11 @@ import (
 	"fmt"
 
 	"github.com/spf13/viper"
+	"go.uber.org/fx"
+)
+
+var Module = fx.Options(
+	fx.Provide(NewAppConfig),
 )
 
 type AppConfig struct {

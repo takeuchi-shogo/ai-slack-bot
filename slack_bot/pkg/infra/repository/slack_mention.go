@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/oklog/ulid/v2"
+	"github.com/takeuchi-shogo/ai-slack-bot/slack_bot/pkg/domain/di"
 	"github.com/takeuchi-shogo/ai-slack-bot/slack_bot/pkg/infra/entity"
 	"github.com/uptrace/bun"
 )
@@ -12,7 +13,7 @@ type SlackMentionRepository struct {
 	db *bun.DB
 }
 
-func NewSlackMentionRepository(db *bun.DB) *SlackMentionRepository {
+func NewSlackMentionRepository(db *bun.DB) di.SlackMentionRepository {
 	return &SlackMentionRepository{db: db}
 }
 

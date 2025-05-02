@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -13,69 +14,115 @@ import (
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
+	"github.com/takeuchi-shogo/ai-slack-bot/slack_bot/bootstrap"
 	"github.com/takeuchi-shogo/ai-slack-bot/slack_bot/config"
+	"go.uber.org/fx"
 )
 
-func main() {
-	cfg, err := config.NewAppConfig()
-	if err != nil {
-		log.Fatal(err)
-	}
+type SlackBotApp struct {
+	SlackClient      *slack.Client
+	SocketModeClient *socketmode.Client
+	AppConfig        *config.AppConfig
+}
 
+func main() {
+	fx.New(
+		bootstrap.CommandModule,
+		fx.Provide(NewSlackBotApp),
+		fx.Invoke(func(app *SlackBotApp) {
+			// 依存性の注入が完了したことを確認するだけ
+			fmt.Println("Slack Bot Application started")
+		}),
+	).Run()
+}
+
+func NewSlackBotApp(lc fx.Lifecycle, cfg *config.AppConfig) *SlackBotApp {
+	fmt.Println("AppConfig: ", cfg)
+
+	// Slackクライアントを作成
 	api := slack.New(
 		cfg.SlackBot.BotToken,
+		slack.OptionAppLevelToken(cfg.SlackBot.AppToken), // Socketモードに必要なAppトークンを設定
 		slack.OptionDebug(true),
 		slack.OptionLog(log.New(os.Stdout, "slack-bot: ", log.Lshortfile|log.LstdFlags)),
-		slack.OptionAppLevelToken(cfg.SlackBot.AppToken),
 	)
 
-	// イベントハンドラを登録
-	client := socketmode.New(
+	// SocketModeクライアントを作成
+	socketClient := socketmode.New(
 		api,
 		socketmode.OptionDebug(true),
-		socketmode.OptionLog(log.New(os.Stdout, "slack-bot: ", log.Lshortfile|log.LstdFlags)),
+		socketmode.OptionLog(log.New(os.Stdout, "socketmode: ", log.Lshortfile|log.LstdFlags)),
 	)
 
-	go func() {
-		for evt := range client.Events {
-			switch evt.Type {
-			case socketmode.EventTypeConnecting:
-				fmt.Println("Connecting to Slack...")
-			case socketmode.EventTypeConnected:
-				fmt.Println("Connected to Slack!")
-			case socketmode.EventTypeEventsAPI:
-				// イベントを確認してACK（応答）を返す
-				client.Ack(*evt.Request)
+	app := &SlackBotApp{
+		SlackClient:      api,
+		SocketModeClient: socketClient,
+		AppConfig:        cfg,
+	}
 
-				log.Println("EventsAPI")
-				eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
-				if !ok {
-					log.Printf("Could not type assert to EventsAPIEvent: %v", evt)
-					continue
+	// イベントハンドラを設定
+	go app.handleEvents()
+
+	// ライフサイクルフックを追加
+	lc.Append(fx.Hook{
+		OnStart: func(ctx context.Context) error {
+			fmt.Println("Starting SocketMode client...")
+			// 非同期でSocketModeクライアントを起動
+			go func() {
+				err := app.SocketModeClient.Run()
+				if err != nil {
+					log.Printf("SocketMode実行エラー: %v", err)
+					// エラーが致命的な場合はプロセスを終了
+					os.Exit(1)
 				}
-				log.Printf("Received event: %+v", eventsAPIEvent)
+			}()
+			return nil
+		},
+		OnStop: func(ctx context.Context) error {
+			fmt.Println("Stopping Slack Bot Application...")
+			// 必要なクリーンアップ処理をここに記述
+			return nil
+		},
+	})
 
-				switch eventsAPIEvent.Type {
-				case slackevents.CallbackEvent:
-					innerEvent := eventsAPIEvent.InnerEvent
-					switch ev := innerEvent.Data.(type) {
-					case *slackevents.AppMentionEvent:
-						fmt.Println("AppMentionEvent")
-						handleAppMention(ev, api)
-					}
+	return app
+}
+
+// イベント処理を行うメソッド
+func (app *SlackBotApp) handleEvents() {
+	for evt := range app.SocketModeClient.Events {
+		switch evt.Type {
+		case socketmode.EventTypeConnecting:
+			fmt.Println("Connecting to Slack...")
+		case socketmode.EventTypeConnectionError:
+			fmt.Printf("Connection error: %v\n", evt.Data)
+		case socketmode.EventTypeConnected:
+			fmt.Println("Connected to Slack!")
+		case socketmode.EventTypeEventsAPI:
+			// イベントを確認してACK（応答）を返す
+			app.SocketModeClient.Ack(*evt.Request)
+
+			eventsAPIEvent, ok := evt.Data.(slackevents.EventsAPIEvent)
+			if !ok {
+				log.Printf("Type assertion error: %v", evt.Data)
+				continue
+			}
+
+			switch eventsAPIEvent.Type {
+			case slackevents.CallbackEvent:
+				innerEvent := eventsAPIEvent.InnerEvent
+				switch ev := innerEvent.Data.(type) {
+				case *slackevents.AppMentionEvent:
+					fmt.Println("AppMentionEvent")
+					app.handleAppMention(ev)
 				}
 			}
 		}
-	}()
-
-	err = client.Run()
-	if err != nil {
-		log.Fatal(err)
 	}
 }
 
-// あとでApplication層に移動
-func handleAppMention(evt *slackevents.AppMentionEvent, client *slack.Client) {
+// メンション処理メソッド
+func (app *SlackBotApp) handleAppMention(evt *slackevents.AppMentionEvent) {
 	// メッセージのメタデータとコンテンツを表示
 	fmt.Printf("メンション情報: %+v\n", evt)
 	fmt.Printf("メンション詳細:\n")
@@ -86,12 +133,12 @@ func handleAppMention(evt *slackevents.AppMentionEvent, client *slack.Client) {
 	fmt.Printf("  メッセージテキスト: %s\n", evt.Text)
 
 	// ElasticMQにメッセージを送信
-	err := sendToElasticMQ(evt)
+	err := app.sendToElasticMQ(evt)
 	if err != nil {
 		fmt.Printf("ElasticMQへの送信エラー: %v\n", err)
 
 		// エラーが発生した場合のみSlackに返信
-		_, _, err = client.PostMessage(evt.Channel,
+		_, _, err = app.SlackClient.PostMessage(evt.Channel,
 			slack.MsgOptionText(fmt.Sprintf("<@%s> メッセージキューへの送信中にエラーが発生しました。", evt.User), false),
 			slack.MsgOptionTS(evt.ThreadTimeStamp),
 		)
@@ -105,21 +152,15 @@ func handleAppMention(evt *slackevents.AppMentionEvent, client *slack.Client) {
 	log.Printf("メッセージをキューに送信しました。処理はPythonに委譲します。")
 }
 
-// ElasticMQにメッセージを送信する関数
-func sendToElasticMQ(evt *slackevents.AppMentionEvent) error {
-	// 設定を取得
-	cfg, err := config.NewAppConfig()
-	if err != nil {
-		return fmt.Errorf("設定読み込みエラー: %w", err)
-	}
-
+// ElasticMQにメッセージを送信するメソッド
+func (app *SlackBotApp) sendToElasticMQ(evt *slackevents.AppMentionEvent) error {
 	// AWS SDKの設定
 	sess, err := session.NewSession(&aws.Config{
-		Region:   aws.String(cfg.ElasticMQ.Region),
-		Endpoint: aws.String(cfg.ElasticMQ.Endpoint),
+		Region:   aws.String(app.AppConfig.ElasticMQ.Region),
+		Endpoint: aws.String(app.AppConfig.ElasticMQ.Endpoint),
 		Credentials: credentials.NewStaticCredentials(
-			cfg.ElasticMQ.AccessKey,
-			cfg.ElasticMQ.SecretKey,
+			app.AppConfig.ElasticMQ.AccessKey,
+			app.AppConfig.ElasticMQ.SecretKey,
 			"", // トークン
 		),
 	})
@@ -144,7 +185,7 @@ func sendToElasticMQ(evt *slackevents.AppMentionEvent) error {
 	}
 
 	// キューURLの構築
-	queueURL := fmt.Sprintf("%s/queue/%s", cfg.ElasticMQ.Endpoint, cfg.ElasticMQ.QueueName)
+	queueURL := fmt.Sprintf("%s/queue/%s", app.AppConfig.ElasticMQ.Endpoint, app.AppConfig.ElasticMQ.QueueName)
 
 	// メッセージ送信
 	_, err = svc.SendMessage(&sqs.SendMessageInput{
@@ -155,6 +196,6 @@ func sendToElasticMQ(evt *slackevents.AppMentionEvent) error {
 		return fmt.Errorf("SQS送信エラー: %w", err)
 	}
 
-	fmt.Printf("メッセージを%sのキュー%sに送信しました\n", cfg.ElasticMQ.Endpoint, cfg.ElasticMQ.QueueName)
+	fmt.Printf("メッセージを%sのキュー%sに送信しました\n", app.AppConfig.ElasticMQ.Endpoint, app.AppConfig.ElasticMQ.QueueName)
 	return nil
 }
