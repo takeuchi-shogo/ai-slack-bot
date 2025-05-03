@@ -139,7 +139,9 @@ class MCPClient:
             [tool.name for tool in tools],
         )
 
-    async def process_query(self, query: str) -> str:
+    async def process_query(
+        self, query: str, thread_ts: str = None, user_id: str = None
+    ) -> str:
         """
         ユーザークエリを処理し、適切なモデルとサーバーを使用して応答を生成
 
@@ -148,6 +150,8 @@ class MCPClient:
 
         Args:
             query: ユーザーから入力されたクエリ文字列
+            thread_ts: メッセージのスレッドタイムスタンプ（スレッド返信の場合）
+            user_id: ユーザーID（メンション付き返信の場合）
 
         Returns:
             str: モデルやツールによって生成された応答
@@ -156,26 +160,47 @@ class MCPClient:
         response = await self.session.list_tools()
 
         # Add logic to handle multi-server operations
-        if "github" in query.lower() and "slack" in query.lower():
+        if (
+            ("github" in query.lower() and "slack" in query.lower())
+            or ("github" in query.lower() and "notion" in query.lower())
+            or ("コード検索" in query and "タスク" in query)
+            or ("問題" in query and "修正" in query)
+        ):
             # This might be a cross-server operation
-            return await self._process_cross_server_query(query)
+            return await self._process_cross_server_query(query, thread_ts, user_id)
         elif self.model_provider == "anthropic":
             # Format for Anthropic (Claude)
-            return await self._process_with_anthropic(query, response.tools)
+            result = await self._process_with_anthropic(query, response.tools)
+
+            # If we have thread_ts and user_id, it's a Slack message we should reply to
+            if thread_ts and user_id and self.current_server == "slack":
+                await self._reply_to_slack_thread(result, thread_ts, user_id)
+
+            return result
         else:
             # Format for Gemini
-            return await self._process_with_gemini(query, response.tools)
+            result = await self._process_with_gemini(query, response.tools)
 
-    async def _process_cross_server_query(self, query: str) -> str:
+            # If we have thread_ts and user_id, it's a Slack message we should reply to
+            if thread_ts and user_id and self.current_server == "slack":
+                await self._reply_to_slack_thread(result, thread_ts, user_id)
+
+            return result
+
+    async def _process_cross_server_query(
+        self, query: str, thread_ts: str = None, user_id: str = None
+    ) -> str:
         """
-        複数のMCPサーバー間での操作を処理（GitHub → Slack）
+        複数のMCPサーバー間での操作を処理（GitHub → Notion → Slack）
 
-        このメソッドは、GitHubからデータを取得し、そのデータをSlackに投稿するといった
-        複数サーバーにまたがる操作を実行します。サーバー間の切り替えと元の状態への
-        復帰も管理します。
+        このメソッドは、GitHubからコード情報を取得し、問題があればNotionにタスクを作成し、
+        その結果をSlackに投稿する複数サーバーにまたがる操作を実行します。
+        サーバー間の切り替えと元の状態への復帰も管理します。
 
         Args:
             query: ユーザーから入力されたクエリ文字列
+            thread_ts: Slackスレッドのタイムスタンプ（スレッド返信の場合）
+            user_id: SlackユーザーID（メンション付き返信の場合）
 
         Returns:
             str: 処理の各段階とその結果を示す文字列
@@ -194,22 +219,54 @@ class MCPClient:
                 await self.connect_to_server(server_name="github")
                 result_text.append("GitHub接続成功")
 
-                # Step 2: Get GitHub information
-                # Example: get repo list, issues, etc.
-                # This would require parsing the query to determine what GitHub info to fetch
+                # Step 2: Get GitHub information & analyze code issues
                 github_info = await self._extract_github_info(query)
                 result_text.append(f"GitHub情報取得: {github_info}")
 
-                # Step 3: Reconnect to Slack
-                await self.cleanup()  # Close GitHub connection
-                result_text.append("Slackサーバーに再接続中...")
+                # Check if code issues were found that need tasks
+                need_task_creation = (
+                    "問題" in github_info
+                    or "バグ" in github_info
+                    or "修正" in github_info
+                )
+                notion_task_info = None
+
+                # Step 3: Connect to Notion if we need to create tasks
+                if need_task_creation:
+                    await self.cleanup()  # Close GitHub connection
+                    result_text.append("Notionサーバーに接続中...")
+                    await self.connect_to_server(server_name="notionApi")
+                    result_text.append("Notion接続成功")
+
+                    # Create task in Notion
+                    notion_task_info = await self._create_notion_task(
+                        github_info, query
+                    )
+                    result_text.append(f"Notionタスク作成結果: {notion_task_info}")
+
+                # Step 4: Reconnect to Slack to post the summary
+                await self.cleanup()  # Close current connection
+                result_text.append("Slackサーバーに接続中...")
                 await self.connect_to_server(server_name="slack")
                 result_text.append("Slack接続成功")
 
-                # Step 4: Post to Slack
+                # Step 5: Post to Slack with combined info
                 if self.default_channel_id:
-                    post_result = await self._post_to_slack(github_info)
-                    result_text.append(f"Slack投稿結果: {post_result}")
+                    # Prepare summary message including GitHub findings and Notion task if created
+                    summary = f"GitHubコード分析結果:\n{github_info}"
+                    if notion_task_info:
+                        summary += f"\n\nNotionタスク作成:\n{notion_task_info}"
+
+                    # If we have thread info, reply to thread
+                    if thread_ts and user_id:
+                        post_result = await self._reply_to_slack_thread(
+                            summary, thread_ts, user_id
+                        )
+                        result_text.append(f"Slackスレッドへの返信結果: {post_result}")
+                    else:
+                        # Otherwise post as a new message
+                        post_result = await self._post_to_slack(summary)
+                        result_text.append(f"Slack投稿結果: {post_result}")
                 else:
                     result_text.append(
                         "デフォルトのSlackチャンネルが設定されていません"
@@ -225,6 +282,8 @@ class MCPClient:
                     await self.connect_to_server(server_name="slack")
                 elif original_server == "github":
                     await self.connect_to_server(server_name="github")
+                elif original_server == "notionApi":
+                    await self.connect_to_server(server_name="notionApi")
 
             return "\n".join(result_text)
         except Exception as e:
@@ -232,36 +291,369 @@ class MCPClient:
 
     async def _extract_github_info(self, query: str) -> str:
         """
-        GitHubからクエリに基づいて情報を抽出
+        GitHubからクエリに基づいて情報を抽出し、問題コードを分析
 
         このメソッドは、GitHub MCPサーバーを介してGitHubから情報を取得します。
-        利用可能なGitHubツールを検出し、適切なツールを使用して情報を取得します。
+        コード検索、リポジトリ分析、問題のあるコードの特定などを行います。
+
+        クエリ内容を分析し、適切なGithubツールを使用してコードや問題を検索します。
+        検索したコードに問題が見つかった場合は、その問題内容も分析します。
 
         Args:
             query: 情報抽出のためのクエリ
 
         Returns:
-            str: GitHubから取得した情報
+            str: GitHubから取得した情報と問題分析結果
         """
-        # This is a placeholder - actual implementation would parse query
-        # and use GitHub tools to fetch relevant information
-
-        # Example: List repositories
         try:
             # Check available GitHub tools
             response = await self.session.list_tools()
             tools = [tool.name for tool in response.tools]
 
-            if "github_list_repos" in tools:
-                result = await self.session.call_tool("github_list_repos", {})
-                return self._extract_tool_content(result.content)
-            elif "github_get_user" in tools:
-                result = await self.session.call_tool("github_get_user", {})
-                return self._extract_tool_content(result.content)
-            else:
-                return "利用可能なGitHubツールが見つかりませんでした"
+            results = []
+
+            # Parse query to identify what to search for
+            query_lower = query.lower()
+
+            # Repository related searches
+            if (
+                "リポジトリ" in query
+                or "レポジトリ" in query
+                or "repository" in query_lower
+            ):
+                if "github_list_repos" in tools:
+                    result = await self.session.call_tool("github_list_repos", {})
+                    repos_info = self._extract_tool_content(result.content)
+                    results.append(f"リポジトリ一覧:\n{repos_info}")
+
+            # Code search related
+            code_search_terms = []
+            if "コード検索" in query or "code search" in query_lower:
+                # Extract potential search terms from the query
+                # Look for terms in quotes or specific keywords
+                import re
+
+                quote_pattern = r'"([^"]+)"'
+                quoted_terms = re.findall(quote_pattern, query)
+
+                if quoted_terms:
+                    code_search_terms.extend(quoted_terms)
+                else:
+                    # Try to extract key terms
+                    potential_terms = [
+                        term
+                        for term in query.split()
+                        if len(term) > 3
+                        and term
+                        not in ["コード検索", "検索", "github", "code", "search"]
+                    ]
+                    if potential_terms:
+                        code_search_terms.extend(
+                            potential_terms[:2]
+                        )  # Use first 2 longer terms
+
+            # Perform code search if we have terms
+            if code_search_terms and "github_search_code" in tools:
+                for term in code_search_terms:
+                    result = await self.session.call_tool(
+                        "github_search_code", {"query": term}
+                    )
+                    search_results = self._extract_tool_content(result.content)
+                    results.append(f"「{term}」のコード検索結果:\n{search_results}")
+
+                    # If we find code, analyze it for potential issues
+                    if (
+                        search_results
+                        and len(search_results) > 10
+                        and "github_get_content" in tools
+                    ):
+                        # Extract a file path from the search results
+                        import re
+
+                        file_paths = re.findall(
+                            r"([a-zA-Z0-9_\-/\.]+\.(py|js|ts|go|java|rb))",
+                            search_results,
+                        )
+
+                        if file_paths:
+                            # Get the first file content
+                            file_path = file_paths[0][0]
+                            repo_name = None
+
+                            # Try to extract repo name from search results
+                            repo_match = re.search(
+                                r"([a-zA-Z0-9_\-\.]+/[a-zA-Z0-9_\-\.]+):",
+                                search_results,
+                            )
+                            if repo_match:
+                                repo_name = repo_match.group(1)
+
+                            if repo_name:
+                                content_result = await self.session.call_tool(
+                                    "github_get_content",
+                                    {"repo": repo_name, "path": file_path},
+                                )
+                                file_content = self._extract_tool_content(
+                                    content_result.content
+                                )
+
+                                # Analyze code for potential issues
+                                analysis = self._analyze_code_issues(file_content, term)
+                                if analysis:
+                                    results.append(
+                                        f"ファイル「{file_path}」の問題分析:\n{analysis}"
+                                    )
+
+            # Issue related searches
+            if "問題" in query or "issue" in query_lower or "バグ" in query:
+                if "github_list_issues" in tools:
+                    result = await self.session.call_tool(
+                        "github_list_issues", {"state": "open"}
+                    )
+                    issues_info = self._extract_tool_content(result.content)
+                    results.append(f"未解決の問題一覧:\n{issues_info}")
+
+            # If no specific search was performed, fallback to general repo info
+            if not results:
+                if "github_list_repos" in tools:
+                    result = await self.session.call_tool("github_list_repos", {})
+                    return self._extract_tool_content(result.content)
+                elif "github_get_user" in tools:
+                    result = await self.session.call_tool("github_get_user", {})
+                    return self._extract_tool_content(result.content)
+                else:
+                    return "利用可能なGitHubツールが見つかりませんでした"
+
+            return "\n\n".join(results)
         except Exception as e:
             return f"GitHub情報取得エラー: {str(e)}"
+
+    def _analyze_code_issues(self, code_content: str, search_term: str) -> str:
+        """
+        コードの問題点を分析
+
+        このメソッドは、取得したコード内容を分析して潜在的な問題点を特定します。
+        単純なルールベースの分析を行い、コードの質や潜在的なバグを検出します。
+
+        Args:
+            code_content: 分析するコードコンテンツ
+            search_term: 検索に使用した用語
+
+        Returns:
+            str: 検出された問題点の説明
+        """
+        issues = []
+
+        # 明らかなコードの問題を検出
+        if "TODO" in code_content:
+            issues.append("未完了の TODO コメントが含まれています")
+
+        if "FIXME" in code_content:
+            issues.append("修正が必要な FIXME コメントが含まれています")
+
+        if "BUG" in code_content or "bug" in code_content.lower():
+            issues.append("バグに関する言及があります")
+
+        # セキュリティ関連の問題
+        if any(
+            term in code_content.lower()
+            for term in ["password", "secret", "key", "token", "パスワード", "秘密"]
+        ):
+            if any(
+                term in code_content.lower() for term in ["hardcoded", "ハードコード"]
+            ):
+                issues.append(
+                    "ハードコードされた機密情報が含まれている可能性があります"
+                )
+
+        # エラーハンドリング
+        if (
+            "try" in code_content.lower()
+            and "except" not in code_content.lower()
+            and "catch" not in code_content.lower()
+        ):
+            issues.append("エラーハンドリングが不完全な可能性があります")
+
+        # 検索語に基づく分析
+        if search_term.lower() in code_content.lower():
+            lines_with_term = [
+                line.strip()
+                for line in code_content.split("\n")
+                if search_term.lower() in line.lower()
+            ]
+            if lines_with_term:
+                term_context = "\n".join(lines_with_term[:3])  # 最初の3行まで
+                issues.append(f"検索語「{search_term}」を含む箇所:\n{term_context}")
+
+        # パフォーマンスの問題
+        if (
+            "for" in code_content.lower()
+            and "for" in code_content.lower().split("for")[1]
+        ):
+            issues.append(
+                "ネストされたループがあり、パフォーマンスの問題がある可能性があります"
+            )
+
+        # 結果を返す
+        if issues:
+            return "- " + "\n- ".join(issues)
+        else:
+            return "明らかな問題は検出されませんでした"
+
+    async def _create_notion_task(self, github_info: str, original_query: str) -> str:
+        """
+        Notionにタスクを作成
+
+        このメソッドは、Notion MCPサーバーを介してNotionデータベースに
+        タスクを作成します。GitHub検索結果に基づいて問題点を特定し、
+        修正タスクをNotionに登録します。
+
+        Args:
+            github_info: GitHubから取得した情報
+            original_query: 元のユーザークエリ
+
+        Returns:
+            str: タスク作成結果のメッセージ
+        """
+        try:
+            # Check available Notion tools
+            response = await self.session.list_tools()
+            tools = [tool.name for tool in response.tools]
+
+            if "notion_create_page" not in tools:
+                return "Notionページ作成ツールが利用できません"
+
+            # Extract key information from GitHub info to create a meaningful task
+            # Look for code issues or problems mentioned in the GitHub info
+            task_title = "コード修正タスク"
+            issue_summary = []
+            code_file = None
+
+            # Extract file paths mentioned
+            import re
+
+            file_paths = re.findall(r"ファイル「([^」]+)」", github_info)
+            if file_paths:
+                code_file = file_paths[0]
+                task_title = f"{code_file} の修正"
+
+            # Extract issues
+            issues_section = None
+            if "問題分析" in github_info:
+                analysis_parts = github_info.split("問題分析:")
+                if len(analysis_parts) > 1:
+                    issues_section = analysis_parts[1].strip()
+
+            if issues_section:
+                # Extract bullet points
+                issue_lines = [
+                    line.strip()
+                    for line in issues_section.split("\n")
+                    if line.strip().startswith("-")
+                ]
+                issue_summary = [line[2:].strip() for line in issue_lines]
+
+            # Create task description
+            task_description = f"""
+## 修正タスク
+
+### 元のクエリ
+{original_query}
+
+### 対象ファイル
+{code_file if code_file else "特定のファイルは指定されていません"}
+
+### 検出された問題点
+{"- " + "\n- ".join(issue_summary) if issue_summary else "詳細な問題点は検出されませんでした"}
+
+### GitHub情報
+```
+{github_info[:500]}{"..." if len(github_info) > 500 else ""}
+```
+
+### 修正手順
+1. 該当コードを確認する
+2. 問題点を理解する
+3. 修正案を検討する
+4. 修正を実装する
+5. テストを実施する
+6. プルリクエストを作成する
+            """
+
+            # Look for appropriate Notion database ID
+            # First try to see if we can list databases
+            database_id = None
+            if "notion_list_databases" in tools:
+                result = await self.session.call_tool("notion_list_databases", {})
+                databases_info = self._extract_tool_content(result.content)
+
+                # Try to find a Tasks or Projects database
+                import json
+
+                try:
+                    if isinstance(
+                        databases_info, str
+                    ) and databases_info.strip().startswith("{"):
+                        databases = json.loads(databases_info)
+                        for db in databases.get("results", []):
+                            db_title = db.get("title", "").lower()
+                            if (
+                                "task" in db_title
+                                or "project" in db_title
+                                or "todo" in db_title
+                            ):
+                                database_id = db.get("id")
+                                break
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+
+            # If we couldn't find a database ID, use a default task database ID if available
+            if not database_id:
+                # Default database ID might be set in the future or obtained from environment
+                # For now, we'll return an error if we can't find one
+                return "タスク用のNotionデータベースが見つかりませんでした"
+
+            # Create the task in Notion
+            properties = {
+                "Name": {"title": [{"text": {"content": task_title}}]},
+                "Status": {"select": {"name": "未着手"}},
+                "Priority": {"select": {"name": "中"}},
+            }
+
+            # Add a due date about a week from now
+            from datetime import datetime, timedelta
+
+            due_date = (datetime.now() + timedelta(days=7)).strftime("%Y-%m-%d")
+            properties["Due"] = {"date": {"start": due_date}}
+
+            # Create the page
+            result = await self.session.call_tool(
+                "notion_create_page",
+                {
+                    "database_id": database_id,
+                    "properties": properties,
+                    "content": task_description,
+                },
+            )
+
+            response_content = self._extract_tool_content(result.content)
+
+            # Extract page URL for easy access
+            page_url = None
+            try:
+                response_data = (
+                    json.loads(response_content)
+                    if isinstance(response_content, str)
+                    else response_content
+                )
+                page_url = response_data.get("url")
+            except (json.JSONDecodeError, AttributeError):
+                page_url = "URL取得できませんでした"
+
+            return f"Notionタスク「{task_title}」が作成されました。\nURL: {page_url}"
+
+        except Exception as e:
+            return f"Notionタスク作成エラー: {str(e)}"
 
     async def _post_to_slack(self, content: str) -> str:
         """
@@ -281,7 +673,12 @@ class MCPClient:
             if not self.default_channel_id:
                 return "デフォルトのSlackチャンネルIDが設定されていません"
 
-            message = f"GitHubから取得した情報:\n```\n{content}\n```"
+            # Check if the content is too long and summarize if needed
+            if len(content) > 2000:
+                message = f"要約された情報:\n```\n{content[:1000]}...\n\n...(長いため省略されました。全部で{len(content)}文字)...\n```"
+            else:
+                message = f"取得した情報:\n```\n{content}\n```"
+
             result = await self.session.call_tool(
                 "slack_post_message",
                 {"channel_id": self.default_channel_id, "text": message},
@@ -290,6 +687,85 @@ class MCPClient:
             return self._extract_tool_content(result.content)
         except Exception as e:
             return f"Slack投稿エラー: {str(e)}"
+
+    async def _reply_to_slack_thread(
+        self, content: str, thread_ts: str, user_id: str
+    ) -> str:
+        """
+        Slackスレッドに返信
+
+        このメソッドは、特定のSlackスレッドにメンション付きで返信します。
+        長い内容の場合は自動的に要約を行います。
+
+        Args:
+            content: 返信内容
+            thread_ts: 返信先スレッドのタイムスタンプ
+            user_id: メンション先のユーザーID
+
+        Returns:
+            str: 返信結果のメッセージ
+        """
+        try:
+            if not self.default_channel_id:
+                return "デフォルトのSlackチャンネルIDが設定されていません"
+
+            # Format message with mention
+            user_mention = f"<@{user_id}>"
+
+            # Check if the content is too long and summarize
+            if len(content) > 2000:
+                # Split into paragraphs
+                paragraphs = content.split("\n\n")
+
+                # Take the first paragraph and some key information
+                summary_parts = [paragraphs[0]]
+
+                # Look for important sections like "問題分析" or "Notionタスク作成"
+                important_sections = []
+                for para in paragraphs:
+                    if any(
+                        keyword in para
+                        for keyword in ["問題分析", "Notionタスク", "URL:", "修正手順"]
+                    ):
+                        important_sections.append(para)
+
+                # Add up to 3 important sections
+                summary_parts.extend(important_sections[:3])
+
+                # Create summarized message
+                summarized_content = "\n\n".join(summary_parts)
+                message = f"{user_mention} 結果の要約です:\n\n{summarized_content}\n\n(詳細は省略されました。全部で{len(content)}文字)"
+            else:
+                message = f"{user_mention}\n\n{content}"
+
+            # Check if thread_reply tool is available
+            response = await self.session.list_tools()
+            tools = [tool.name for tool in response.tools]
+
+            if "slack_reply_to_thread" in tools:
+                result = await self.session.call_tool(
+                    "slack_reply_to_thread",
+                    {
+                        "channel_id": self.default_channel_id,
+                        "text": message,
+                        "thread_ts": thread_ts,
+                    },
+                )
+                return self._extract_tool_content(result.content)
+            else:
+                # Fallback to regular post with thread_ts
+                result = await self.session.call_tool(
+                    "slack_post_message",
+                    {
+                        "channel_id": self.default_channel_id,
+                        "text": message,
+                        "thread_ts": thread_ts,
+                    },
+                )
+                return self._extract_tool_content(result.content)
+
+        except Exception as e:
+            return f"Slackスレッド返信エラー: {str(e)}"
 
     def _extract_tool_content(self, content):
         """
@@ -592,12 +1068,16 @@ Slackの統合でできることをユーザーに説明することができま
             print(error_msg)
             return f"Error: {str(e)}"
 
-    async def chat_loop(self):
+    async def chat_loop(self, thread_ts=None, user_id=None):
         """
         対話型チャットループを実行
 
         ユーザーからの入力を受け取り、応答を生成する対話型ループを実行します。
         'quit'と入力されるまで継続します。
+
+        Args:
+            thread_ts: Slackスレッドのタイムスタンプ（CLIでは使用しない）
+            user_id: SlackユーザーID（CLIでは使用しない）
 
         Returns:
             None
@@ -613,7 +1093,7 @@ Slackの統合でできることをユーザーに説明することができま
                 if query.lower() == "quit":
                     break
 
-                response = await self.process_query(query)
+                response = await self.process_query(query, thread_ts, user_id)
                 print("\n" + response)
 
             except Exception as e:
@@ -637,6 +1117,7 @@ async def main():
     メインの実行関数
 
     コマンドライン引数を解析し、適切なモデルとサーバーでMCPクライアントを起動します。
+    スレッド情報やユーザーIDも指定可能で、Slackの自動化スクリプトからも呼び出せます。
 
     Returns:
         None
@@ -654,6 +1135,21 @@ async def main():
         choices=["gemini", "anthropic"],
         help="Model provider to use (default: gemini)",
     )
+    parser.add_argument(
+        "--thread",
+        "-t",
+        help="Slack thread timestamp for thread replies",
+    )
+    parser.add_argument(
+        "--user",
+        "-u",
+        help="Slack user ID to mention in replies",
+    )
+    parser.add_argument(
+        "--query",
+        "-q",
+        help="Direct query to process (non-interactive mode)",
+    )
     args = parser.parse_args()
 
     client = MCPClient(model_provider=args.model)
@@ -662,7 +1158,15 @@ async def main():
             await client.connect_to_server(server_name=args.server)
         else:
             await client.connect_to_server(server_script_path=args.path)
-        await client.chat_loop()
+
+        # Check if we're in non-interactive mode
+        if args.query:
+            # Process single query and exit
+            result = await client.process_query(args.query, args.thread, args.user)
+            print(result)
+        else:
+            # Start interactive chat loop
+            await client.chat_loop(args.thread, args.user)
     finally:
         await client.cleanup()
 
