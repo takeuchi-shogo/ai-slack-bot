@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import asyncpg
 from config import settings
@@ -46,15 +46,43 @@ class DBService:
             await self.pool.close()
             logger.info("データベース接続プールを閉じました")
 
+    async def extract_parameters_from_query(self, query: str) -> Tuple[str, List[str]]:
+        """
+        パラメータ化された文字列を標準的なSQLに変換する
+
+        Args:
+            query: SQLクエリ文字列（例: "SELECT * FROM users WHERE name = :name AND age > :age"）
+
+        Returns:
+            変換されたクエリとパラメータ名のリストのタプル
+        """
+        # :name 形式のパラメータを $1, $2, ... 形式に変換
+        param_pattern = r":(\w+)"
+        param_matches = re.findall(param_pattern, query)
+        param_names = []
+
+        # パラメータ名が重複している場合、最初の出現のみをリストに追加
+        for name in param_matches:
+            if name not in param_names:
+                param_names.append(name)
+
+        # クエリ変換
+        converted_query = query
+        for i, name in enumerate(param_names, 1):
+            # パラメータ名をプレースホルダーに置き換え
+            converted_query = re.sub(f":{name}\\b", f"${i}", converted_query)
+
+        return converted_query, param_names
+
     async def execute_query(
-        self, query: str, params: Optional[List[Any]] = None
+        self, query: str, params: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         SQLクエリを実行する
 
         Args:
             query: 実行するSQLクエリ
-            params: クエリパラメータ（オプション）
+            params: クエリパラメータ辞書（オプション）
 
         Returns:
             実行結果を含む辞書
@@ -81,13 +109,24 @@ class DBService:
 
         async with self.pool.acquire() as conn:
             try:
+                # パラメータが辞書形式で渡された場合、変換する
+                param_values = []
+                if params:
+                    # パラメータ化されたクエリを変換
+                    (
+                        converted_query,
+                        param_names,
+                    ) = await self.extract_parameters_from_query(query)
+                    # パラメータ値を順番通りに設定
+                    param_values = [params.get(name) for name in param_names]
+                    query = converted_query
+
                 # クエリの種類を判断
                 query_type = self._determine_query_type(query)
-                params = params or []
 
                 if query_type == "SELECT":
                     # SELECT クエリの場合
-                    rows = await conn.fetch(query, *params)
+                    rows = await conn.fetch(query, *param_values)
                     return {
                         "success": True,
                         "query": query,
@@ -96,7 +135,7 @@ class DBService:
                     }
                 else:
                     # その他のクエリ（INSERT, UPDATE, DELETE など）
-                    result = await conn.execute(query, *params)
+                    result = await conn.execute(query, *param_values)
                     return {
                         "success": True,
                         "query": query,

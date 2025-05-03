@@ -7,6 +7,3 @@ ai_agent/**/__pycache__
 
 # slack bot
 slack_bot/config/config.yml
-
-# まだ実装中なため
-/migrations

@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from config import settings
 from langchain.prompts import PromptTemplate
@@ -89,63 +89,141 @@ class DatabaseAgent:
                 "corrected_query": "",
             }
 
-    async def execute_db_query(self, task: MentionTask) -> Dict[str, Any]:
+    async def get_db_schema_info(self) -> Dict[str, Any]:
         """
-        タスクからSQLクエリを抽出し、実行する
-
-        Args:
-            task: メンションタスク
+        データベースのスキーマ情報を取得する
 
         Returns:
-            クエリ実行結果
+            データベーススキーマ情報
         """
         try:
-            # SQLクエリを抽出するプロンプト
-            extract_prompt = PromptTemplate.from_template(
-                """
-                あなたはメッセージからSQLクエリを抽出するAIアシスタントです。
-                以下のメッセージを分析し、含まれているSQLクエリを抽出してください。
+            # テーブル一覧を取得
+            tables_result = await self.db_service.list_tables()
 
-                # メッセージ
+            if not tables_result["success"]:
+                return {
+                    "success": False,
+                    "error": tables_result.get(
+                        "error", "テーブル一覧の取得に失敗しました"
+                    ),
+                }
+
+            tables = tables_result.get("tables", [])
+            schema_info = {"tables": []}
+
+            # 各テーブルのスキーマ情報を取得
+            for table_name in tables:
+                schema_result = await self.db_service.get_table_schema(table_name)
+                if schema_result["success"]:
+                    schema_info["tables"].append(
+                        {
+                            "name": table_name,
+                            "columns": schema_result.get("columns", []),
+                        }
+                    )
+
+            return {
+                "success": True,
+                "schema": schema_info,
+            }
+        except Exception as e:
+            logger.error(f"Error getting database schema: {e}")
+            return {
+                "success": False,
+                "error": f"データベーススキーマの取得中にエラーが発生しました: {str(e)}",
+            }
+
+    async def text_to_sql(
+        self, text: str, schema_info: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        テキストからSQLクエリを生成する
+
+        Args:
+            text: 自然言語テキスト
+            schema_info: データベーススキーマ情報（オプション）
+
+        Returns:
+            生成されたSQLクエリ情報
+        """
+        try:
+            # スキーマ情報がない場合は取得
+            if not schema_info:
+                schema_result = await self.get_db_schema_info()
+                if schema_result["success"]:
+                    schema_info = schema_result.get("schema", {})
+                else:
+                    # スキーマ情報が取得できない場合でも処理を続行
+                    schema_info = {"tables": []}
+
+            # テーブル情報をフォーマット
+            schema_text = "利用可能なテーブル:\n"
+            for table in schema_info.get("tables", []):
+                schema_text += f"- {table['name']}\n"
+                schema_text += "  カラム:\n"
+                for column in table.get("columns", []):
+                    col_name = column.get("column_name", "")
+                    data_type = column.get("data_type", "")
+                    nullable = (
+                        "NULL可" if column.get("is_nullable") == "YES" else "NOT NULL"
+                    )
+                    schema_text += f"    - {col_name} ({data_type}, {nullable})\n"
+
+            # テキストからSQLクエリを生成するプロンプト
+            generate_sql_prompt = PromptTemplate.from_template(
+                """
+                あなたは自然言語をSQLクエリに変換する専門家です。
+                与えられたテキストを分析し、適切なSQLクエリを生成してください。
+
+                # データベース情報
+                {schema_text}
+
+                # ユーザーの質問/要求
                 {text}
 
                 # 指示
-                1. メッセージに含まれるSQLクエリを特定してください。
-                2. SQLクエリが見つからない場合は、ユーザーが実行したいと思われるクエリを推測してください。
-                3. SQLクエリを整形して出力してください。
+                1. ユーザーの要求を分析し、必要なデータを取得するSQLクエリを生成してください。
+                2. 利用可能なテーブルとカラム情報を考慮してください。
+                3. クエリは標準的なSQL構文を使用し、見やすいフォーマットにしてください。
+                4. JOINが必要な場合は適切に使用してください。
+                5. 必要に応じてWHERE句、GROUP BY句、ORDER BY句などを使用してください。
 
                 # 出力形式
                 以下の形式でJSON出力してください:
                 ```json
                 {{
-                  "query": "抽出または推測したSQLクエリ",
-                  "is_extracted": true|false  // クエリが直接抽出されたか推測されたか
+                  "query": "生成したSQLクエリ",
+                  "explanation": "このクエリがユーザーの要求にどう対応しているかの説明",
+                  "confidence": 0.0-1.0  // クエリの確信度（0.0〜1.0の数値）
                 }}
                 ```
                 """
             )
 
-            # クエリを抽出
-            extract_chain = extract_prompt | self.llm | StrOutputParser()
-            extract_result = await extract_chain.ainvoke({"text": task.text})
+            # クエリを生成
+            generate_chain = generate_sql_prompt | self.llm | StrOutputParser()
+            generate_result = await generate_chain.ainvoke(
+                {"text": text, "schema_text": schema_text}
+            )
 
             # JSONを抽出して解析
-            json_match = re.search(r"```json\s*(.*?)\s*```", extract_result, re.DOTALL)
+            json_match = re.search(r"```json\s*(.*?)\s*```", generate_result, re.DOTALL)
             if json_match:
                 json_str = json_match.group(1)
             else:
-                json_str = extract_result
+                json_str = generate_result
 
-            extract_data = json.loads(json_str)
-            sql_query = extract_data.get("query", "")
-            is_extracted = extract_data.get("is_extracted", False)
+            generate_data = json.loads(json_str)
+            sql_query = generate_data.get("query", "")
+            explanation = generate_data.get("explanation", "")
+            confidence = generate_data.get("confidence", 0.0)
 
             if not sql_query:
                 return {
                     "success": False,
-                    "error": "SQLクエリを抽出できませんでした",
+                    "error": "SQLクエリを生成できませんでした",
                     "query": "",
-                    "results": [],
+                    "explanation": "",
                 }
 
             # クエリを分析して正当性をチェック
@@ -156,51 +234,88 @@ class DatabaseAgent:
                 # 修正されたクエリを使用
                 corrected_query = analysis.get("corrected_query", "")
 
-                # 修正されたクエリを使ってデータベース検索を実行する
-                db_result = await self.db_service.execute_query(corrected_query)
-
-                if db_result["success"]:
-                    return {
-                        "success": True,
-                        "query_modified": True,
-                        "original_query": sql_query,
-                        "executed_query": corrected_query,
-                        "error_details": analysis.get("error_details", ""),
-                        "results": db_result.get("rows", [])
-                        if "rows" in db_result
-                        else [db_result.get("result", {})],
-                    }
-                else:
-                    # 修正したクエリも失敗した場合、エラー情報を返す
-                    return {
-                        "success": False,
-                        "query_modified": True,
-                        "original_query": sql_query,
-                        "executed_query": corrected_query,
-                        "error_details": analysis.get("error_details", ""),
-                        "db_error": db_result.get("error", "不明なエラー"),
-                    }
+                return {
+                    "success": True,
+                    "query_modified": True,
+                    "original_query": sql_query,
+                    "query": corrected_query,
+                    "explanation": explanation,
+                    "confidence": confidence,
+                    "error_details": analysis.get("error_details", ""),
+                }
             else:
-                # 正しいクエリを使ってデータベース検索を実行する
-                # 実際にデータベースに接続して実行
-                db_result = await self.db_service.execute_query(sql_query)
+                # 有効なクエリ
+                return {
+                    "success": True,
+                    "query_modified": False,
+                    "query": sql_query,
+                    "explanation": explanation,
+                    "confidence": confidence,
+                }
 
-                if db_result["success"]:
-                    return {
-                        "success": True,
-                        "query_modified": False,
-                        "executed_query": sql_query,
-                        "results": db_result.get("rows", [])
-                        if "rows" in db_result
-                        else [db_result.get("result", {})],
-                    }
-                else:
-                    return {
-                        "success": False,
-                        "query_modified": False,
-                        "executed_query": sql_query,
-                        "error": db_result.get("error", "不明なエラー"),
-                    }
+        except Exception as e:
+            logger.error(f"Error generating SQL query: {e}")
+            return {
+                "success": False,
+                "error": f"SQLクエリの生成中にエラーが発生しました: {str(e)}",
+                "query": "",
+                "explanation": "",
+            }
+
+    async def execute_db_query(self, task: MentionTask) -> Dict[str, Any]:
+        """
+        タスクからSQLクエリを抽出または生成し、実行する
+
+        Args:
+            task: メンションタスク
+
+        Returns:
+            クエリ実行結果
+        """
+        try:
+            # データベーススキーマ情報を取得
+            schema_result = await self.get_db_schema_info()
+            schema_info = (
+                schema_result.get("schema", {}) if schema_result["success"] else None
+            )
+
+            # テキストからSQLを生成
+            sql_result = await self.text_to_sql(task.text, schema_info)
+
+            if not sql_result["success"]:
+                return {
+                    "success": False,
+                    "error": sql_result.get("error", "SQLクエリの生成に失敗しました"),
+                    "query": "",
+                    "results": [],
+                }
+
+            sql_query = sql_result["query"]
+            explanation = sql_result.get("explanation", "")
+
+            # クエリを実行
+            db_result = await self.db_service.execute_query(sql_query)
+
+            if db_result["success"]:
+                return {
+                    "success": True,
+                    "query_modified": sql_result.get("query_modified", False),
+                    "original_query": sql_result.get("original_query", ""),
+                    "executed_query": sql_query,
+                    "explanation": explanation,
+                    "results": db_result.get("rows", [])
+                    if "rows" in db_result
+                    else [db_result.get("result", {})],
+                }
+            else:
+                return {
+                    "success": False,
+                    "query_modified": sql_result.get("query_modified", False),
+                    "original_query": sql_result.get("original_query", ""),
+                    "executed_query": sql_query,
+                    "explanation": explanation,
+                    "error": db_result.get("error", "不明なエラー"),
+                }
 
         except Exception as e:
             logger.error(f"Error executing database query: {e}")

@@ -4,7 +4,3 @@ tasks:
   slack-bot:
     cmds:
       - cd slack_bot && go run cmd/main.go
-
-  ai-agent:
-    cmds:
-      - cd ai_agent &&uv run main.py
