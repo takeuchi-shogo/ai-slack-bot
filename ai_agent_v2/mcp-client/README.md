@@ -4,6 +4,35 @@
 
 MCP Client は、Model Context Protocol (MCP) サーバーと通信するための Python クライアントです。SlackやGitHub、Notionなどの外部サービスとの連携を可能にし、大規模言語モデル（LLM）を使用してこれらのサービスとインタラクションできます。コードの問題を検出し、Notionにタスクを作成し、Slackで結果を共有するクロスサーバーワークフローをサポートします。
 
+## コード構成
+
+```
+mcp-client/
+├── client.py (メインエントリーポイント)
+├── config.py (設定管理)
+├── core/
+│   ├── __init__.py
+│   ├── base.py (ベースクラスと共通機能)
+│   ├── session.py (サーバー接続とセッション管理)
+│   └── utils.py (ユーティリティ関数)
+├── models/
+│   ├── __init__.py
+│   ├── anthropic.py (Anthropic/Claude関連)
+│   └── gemini.py (Google Gemini関連)
+├── services/
+│   ├── __init__.py
+│   ├── github.py (GitHub関連機能)
+│   ├── notion.py (Notion関連機能)
+│   └── slack.py (Slack関連機能)
+├── tools/
+│   ├── __init__.py
+│   └── handlers.py (ツール呼び出し処理)
+└── schema/
+    ├── github.json
+    ├── notion.json
+    └── slack.json
+```
+
 ## アーキテクチャ
 
 ### 基本アーキテクチャ
@@ -116,43 +145,29 @@ sequenceDiagram
     Client->>User: 処理結果報告
 ```
 
-## 機能と実装
+## 主要クラスとモジュール
 
-### MCPClient クラス
+### コアモジュール (core/)
+- **BaseMCPClient**: 基本的なセッション管理とクリーンアップ機能を提供
+- **SessionManager**: MCPサーバーとの接続管理
+- **ServerConnector**: サーバーパラメータ生成
 
-クライアントの中核となるクラスで、MCPサーバーとの接続や通信を管理します。
+### モデルモジュール (models/)
+- **AnthropicModelHandler**: Claude APIを利用した処理
+- **GeminiModelHandler**: Gemini APIを利用した処理
 
-#### 主要メソッド
+### ツールモジュール (tools/)
+- **ToolManager**: MCPツールの管理と呼び出し
 
-| メソッド名 | 説明 |
-|------------|------|
-| `__init__` | クライアントの初期化。モデルプロバイダー（geminiまたはanthropic）を設定 |
-| `connect_to_server` | 指定されたMCPサーバー（Slack、GitHub、Notionなど）に接続 |
-| `process_query` | ユーザークエリを処理。適切な処理方法を決定。スレッド情報も処理 |
-| `_process_cross_server_query` | 複数サーバー間の連携処理を実行（GitHub→Notion→Slack） |
-| `_process_with_anthropic` | Claude（Anthropic）を使用してクエリを処理 |
-| `_process_with_gemini` | Gemini（Google）を使用してクエリを処理 |
-| `_extract_github_info` | GitHubからのコード検索・問題分析を実行 |
-| `_analyze_code_issues` | 取得したコードの問題点を分析 |
-| `_create_notion_task` | Notionにタスクを作成 |
-| `_post_to_slack` | Slackへの投稿を処理 |
-| `_reply_to_slack_thread` | Slackスレッドへメンション付きで返信 |
-| `_process_claude_response` | Claude応答の処理とツール呼び出しの管理 |
-| `_process_tool_arguments` | ツール引数の処理と準備 |
-| `_execute_tool_call` | ツール呼び出しの実行 |
-| `_extract_tool_content` | ツール応答からのコンテンツ抽出 |
-| `chat_loop` | 対話型のチャットループを実行。スレッド情報も処理 |
-| `cleanup` | リソースのクリーンアップ |
+### サービスモジュール (services/)
+- **GitHubService**: GitHub連携機能
+- **NotionService**: Notion連携機能
+- **SlackService**: Slack連携機能
 
-## 設定ファイル
-
-### スキーマファイル
-
-`schema` ディレクトリには各サーバーの設定を含むJSONファイルがあります：
-
-- `slack.json`: Slack MCPサーバーの設定
-- `github.json`: GitHub MCPサーバーの設定
-- `notion.json`: Notion MCPサーバーの設定
+### 設定モジュール (config.py)
+- 環境変数の管理
+- モデル設定
+- サーバースキーマの読み込み
 
 ## 使用方法
 
@@ -185,8 +200,8 @@ uv run client.py --server slack --query "コード検索とタスク作成をし
 このクライアントは、新しいMCPサーバーの追加が容易な設計になっています。新しいサービスを追加するには：
 
 1. 対応するスキーマファイルを `schema` ディレクトリに追加
-2. 必要に応じてクロスサーバー処理ロジックを拡張
-3. 新しいサービス用の処理メソッドを追加（必要に応じて）
+2. 必要に応じて新しいサービスクラスを `services/` に追加
+3. 必要に応じてクロスサーバー処理ロジックを拡張
 4. ツール呼び出し処理を実装
 
 ### クロスサーバーフロー拡張
