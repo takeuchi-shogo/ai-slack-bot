@@ -2,39 +2,65 @@
 Anthropic (Claude) モデル処理モジュール
 
 Claudeモデルとの連携と処理を担当します
+LangChainを使用して実装
 """
 
 import json
+from typing import List
 
-from anthropic import Anthropic
-
-from ..config import ANTHROPIC_MODEL_NAME
+from config import (
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_MODEL_NAME,
+    MAX_TOKENS,
+    MODEL_TEMPERATURE,
+    SYSTEM_PROMPT,
+)
+from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.tools import Tool
 
 
 class AnthropicModelHandler:
     """
     Anthropicモデル（Claude）を処理するクラス
+    LangChainを使用して実装
     """
 
     def __init__(self):
         """
         AnthropicModelHandlerを初期化
+        LangChain ChatAnthropicモデルを設定
         """
-        self.anthropic = Anthropic()
+        if not ANTHROPIC_API_KEY:
+            print("Warning: ANTHROPIC_API_KEY not found in environment variables")
 
-    def _format_tools_for_claude(self, mcp_tools):
+        # LangChain ChatAnthropicモデルの初期化
+        self.llm = ChatAnthropic(
+            model=ANTHROPIC_MODEL_NAME,
+            temperature=MODEL_TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+            anthropic_api_key=ANTHROPIC_API_KEY,
+        )
+
+        # システムプロンプトの設定
+        self.system_prompt = SYSTEM_PROMPT
+
+    def _convert_tools_for_langchain(self, mcp_tools) -> List[Tool]:
         """
-        MCPツールをClaude用のフォーマットに変換
+        MCPツールをLangChainのTool形式に変換
 
         Args:
             mcp_tools: MCPツールのリスト
 
         Returns:
-            list: Claudeのツール形式に変換されたリスト
+            List[Tool]: LangChainのツールリスト
         """
-        tools_json = []
+        tools = []
+
         for tool in mcp_tools:
-            # Handle inputSchema - may already be parsed JSON object or a string
+            # 入力スキーマの処理
             try:
                 input_schema = (
                     json.loads(tool.inputSchema)
@@ -44,18 +70,57 @@ class AnthropicModelHandler:
             except (TypeError, json.JSONDecodeError):
                 input_schema = {"type": "object", "properties": {}}
 
-            tool_json = {
-                "name": tool.name,
-                "description": tool.description,
-                "input_schema": input_schema,
-            }
-            tools_json.append(tool_json)
+            # ツールの関数を定義（後でtool_executorに渡す）
+            async def tool_func(tool_name=tool.name, **kwargs):
+                # この関数は実行時に適切なtool_executorを使ってオーバーライドされる
+                pass
 
-        return tools_json
+            # LangChainのTool形式に変換
+            langchain_tool = Tool(
+                name=tool.name, description=tool.description, func=tool_func
+            )
+
+            tools.append(langchain_tool)
+
+        return tools
+
+    async def process_query_simple(self, query: str):
+        """
+        簡易モードでLangChain経由でAnthropic Claude LLMを使用してクエリを処理 (ツールなし)
+
+        Args:
+            query: ユーザークエリ
+
+        Returns:
+            str: Claudeの応答
+        """
+        # プロンプトテンプレートの作成
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                SystemMessage(
+                    content="""あなたはSlackに接続された日本語で対応するアシスタントです。
+簡易モードで実行されているため、外部サービスへの接続はできません。
+ユーザーの質問に直接回答してください。
+日本語で丁寧に回答してください。"""
+                ),
+                HumanMessage(content="{query}"),
+            ]
+        )
+
+        # LangChainの実行チェーン
+        chain = prompt | self.llm | StrOutputParser()
+
+        try:
+            # チェーンを実行して結果を取得
+            result = await chain.ainvoke({"query": query})
+            return result
+        except Exception as e:
+            print(f"Error calling Claude API via LangChain: {str(e)}")
+            return f"Error with Claude API: {str(e)}"
 
     async def process_query(self, query: str, mcp_tools, tool_executor):
         """
-        Anthropic Claude LLMを使用してクエリを処理
+        LangChain経由でAnthropic Claude LLMを使用してクエリを処理
 
         Args:
             query: ユーザークエリ
@@ -65,111 +130,89 @@ class AnthropicModelHandler:
         Returns:
             str: Claudeの応答
         """
-        # Format tools for Claude
-        tools_json = self._format_tools_for_claude(mcp_tools)
+        # MCPツールをLangChainツールに変換
+        langchain_tools = self._convert_tools_for_langchain(mcp_tools)
 
-        # Initial message to Claude
-        messages = [{"role": "user", "content": query}]
+        # ダイナミックツール実行のためのラッパー関数を作成
+        for tool in langchain_tools:
+            # クロージャでツール名をキャプチャし、ツール実行関数をオーバーライド
+            async def _wrapped_executor(tool_name=tool.name, **kwargs):
+                return await tool_executor(tool_name, kwargs)
 
-        # Claude API call
+            # 各ツールの関数を割り当て（クロージャ）
+            tool.func = _wrapped_executor
+
+        # LangChain AgentのためのLLMにツールを設定
+        llm_with_tools = self.llm.bind_tools(langchain_tools)
+
+        # プロンプトテンプレートの作成
+        prompt = ChatPromptTemplate.from_messages(
+            [SystemMessage(content=self.system_prompt), HumanMessage(content="{query}")]
+        )
+
+        # LangChainの実行チェーン
+        chain = prompt | llm_with_tools | StrOutputParser()
+
         try:
-            response = self.anthropic.messages.create(
-                model=ANTHROPIC_MODEL_NAME,
-                max_tokens=1000,
-                messages=messages,
-                tools=tools_json,
-            )
-
-            # Process Claude response
-            return await self._process_claude_response(
-                response, messages, tools_json, tool_executor
-            )
+            # 処理の実行
+            result = await chain.ainvoke({"query": query})
+            return result
         except Exception as e:
-            print(f"Error calling Claude API: {str(e)}")
-            return f"Error with Claude API: {str(e)}"
+            print(f"Error in LangChain execution: {str(e)}")
+            return f"エラーが発生しました: {str(e)}"
 
-    async def _process_claude_response(
-        self, response, messages, tools_json, tool_executor
-    ):
+    async def process_structured_query(self, query: str, mcp_tools, tool_executor):
         """
-        Claude APIからの応答を処理
+        構造化された結果を返すLangChainベースのクエリ処理
+        上級者向け機能として実装（JSONなどの構造化データが必要な場合に使用）
 
         Args:
-            response: Claude APIのレスポンスオブジェクト
-            messages: 会話履歴
-            tools_json: 利用可能なツールの定義（JSON形式）
-            tool_executor: ツール実行関数
+            query: ユーザークエリ
+            mcp_tools: 利用可能なMCPツールのリスト
+            tool_executor: ツール実行のためのコールバック関数
 
         Returns:
-            str: 最終的なテキスト応答
+            Dict: Claudeの構造化された応答
         """
-        final_text = []
-        conversation_history = messages.copy()
+        from langchain_core.output_parsers import JsonOutputParser
 
-        while True:
-            # Extract text content
-            assistant_message = {"role": "assistant", "content": []}
-            has_tool_use = False
+        # MCPツールをLangChainツールに変換
+        langchain_tools = self._convert_tools_for_langchain(mcp_tools)
 
-            for content in response.content:
-                if content.type == "text":
-                    final_text.append(content.text)
-                    assistant_message["content"].append(
-                        {"type": "text", "text": content.text}
-                    )
-                elif content.type == "tool_use":
-                    has_tool_use = True
-                    # Handle the Claude API format for tool calls
-                    tool_name = content.name
-                    tool_args = content.input
-                    tool_id = content.id
+        # ツール実行関数の設定
+        for tool in langchain_tools:
 
-                    # Format tool_use correctly
-                    assistant_message["content"].append(
-                        {
-                            "type": "tool_use",
-                            "id": tool_id,
-                            "name": tool_name,
-                            "input": tool_args,
-                        }
-                    )
+            async def _wrapped_executor(tool_name=tool.name, **kwargs):
+                return await tool_executor(tool_name, kwargs)
 
-                    # Execute tool call
-                    result_content = await tool_executor(tool_name, tool_args)
+            tool.func = _wrapped_executor
 
-                    # Add tool result to conversation
-                    conversation_history.append(assistant_message)
-                    conversation_history.append(
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_id,
-                                    "content": result_content
-                                    if isinstance(result_content, str)
-                                    else json.dumps(result_content),
-                                }
-                            ],
-                        }
-                    )
+        # JSON出力パーサーの設定
+        json_parser = JsonOutputParser()
 
-                    # Get next response from Claude
-                    response = self.anthropic.messages.create(
-                        model=ANTHROPIC_MODEL_NAME,
-                        max_tokens=1000,
-                        messages=conversation_history,
-                        tools=tools_json,
-                    )
+        # LLMにツールを設定
+        llm_with_tools = self.llm.bind_tools(langchain_tools)
 
-                    # Continue processing the new response
-                    break
-            else:
-                # No tool calls in this response, we're done
-                conversation_history.append(assistant_message)
-                # If we never had any tool calls, just return the text
-                if not has_tool_use:
-                    print("No tool calls were made, returning direct response")
-                break
+        # JSONレスポンスを要求するプロンプト
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                SystemMessage(
+                    content=f"{self.system_prompt}\n応答はJSON形式で構造化してください。"
+                ),
+                HumanMessage(content="{query}"),
+            ]
+        )
 
-        return "\n".join(final_text)
+        # JSON出力を生成するチェーン
+        chain = prompt | llm_with_tools | json_parser
+
+        try:
+            # チェーンを実行して構造化された結果を取得
+            result = await chain.ainvoke({"query": query})
+            return result
+        except Exception as e:
+            print(f"Error in structured LangChain execution: {str(e)}")
+            return {
+                "error": str(e),
+                "message": "JSONレスポンスの生成中にエラーが発生しました",
+            }

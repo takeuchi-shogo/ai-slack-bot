@@ -1,3 +1,5 @@
 .env
 
 /schema/*.json
+
+__pycache__

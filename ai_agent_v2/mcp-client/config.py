@@ -2,6 +2,7 @@
 設定管理モジュール
 
 環境変数の読み込みやアプリケーション全体の設定を管理します
+LangChain関連の設定も含む
 """
 
 import json
@@ -19,6 +20,19 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 # モデル名の定数
 ANTHROPIC_MODEL_NAME = "claude-3-5-sonnet-20241022"
 GEMINI_MODEL_NAME = "gemini-1.5-pro"
+
+# LangChain関連の設定
+# モデル設定の温度 (0.0〜1.0)
+MODEL_TEMPERATURE = 0.7
+# トークン制限
+MAX_TOKENS = 4096
+# システムプロンプト
+SYSTEM_PROMPT = """
+あなたはSlackボットとして、ユーザーからのメンションを処理し適切に返答するAIアシスタントです。
+GitHubリポジトリの情報や、Notionのコンテンツなど、様々なツールにアクセスして回答を生成できます。
+必要に応じて、Notionにタスクを作成することもできます。
+回答は簡潔で明確にし、必要な情報のみを提供してください。
+"""
 
 
 # サーバースキーマ関連

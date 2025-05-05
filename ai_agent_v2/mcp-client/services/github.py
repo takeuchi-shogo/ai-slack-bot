@@ -6,7 +6,7 @@ GitHub APIとの連携機能を提供します
 
 import re
 
-from ..core.utils import analyze_code_issues
+from core.utils import analyze_code_issues
 
 
 class GitHubService:

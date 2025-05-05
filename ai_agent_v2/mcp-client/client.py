@@ -3,14 +3,18 @@ MCPクライアントメインモジュール
 
 Model Context Protocol (MCP) サーバーとの通信と連携を管理する
 メインクラスと実行エントリーポイントを提供します
+LangChainを使用したAIエージェントに対応
 """
-import asyncio
+
 import argparse
-from typing import Optional
+import asyncio
+from enum import Enum
 
 # Core modules
 from core.session import SessionManager
-from tools.handlers import ToolManager
+
+# LangChain dependencies
+from langchain_core.messages import AIMessage, HumanMessage
 
 # Model handlers
 from models.anthropic import AnthropicModelHandler
@@ -20,6 +24,15 @@ from models.gemini import GeminiModelHandler
 from services.github import GitHubService
 from services.notion import NotionService
 from services.slack import SlackService
+from tools.handlers import ToolManager
+
+
+class ConnectionMode(Enum):
+    """接続モードを定義する列挙型"""
+
+    SIMPLE = "simple"  # 簡易モード (スクリプトを直接実行)
+    FULL = "full"  # 完全モード (MCPサーバーに接続)
+
 
 class MCPClient:
     """
@@ -31,6 +44,7 @@ class MCPClient:
     Attributes:
         session_manager: MCPサーバーとのセッション管理
         model_provider: 使用するLLMプロバイダー（"anthropic"または"gemini"）
+        connection_mode: 接続モード（"simple"または"full"）
         anthropic_handler: Claude APIハンドラ
         gemini_handler: Gemini APIハンドラ
         tool_manager: ツール管理インスタンス
@@ -39,27 +53,36 @@ class MCPClient:
         slack_service: Slackサービス
     """
 
-    def __init__(self, model_provider="gemini"):
+    def __init__(self, model_provider="gemini", connection_mode=ConnectionMode.FULL):
         """
         MCPClientの初期化
+        LangChain対応のモデルハンドラーを初期化
 
         Args:
             model_provider: 使用するLLMプロバイダー（デフォルト: "gemini"）
                             "anthropic"または"gemini"が指定可能
+            connection_mode: 接続モード（デフォルト: ConnectionMode.FULL）
+                             ConnectionMode.SIMPLE（簡易モード）またはConnectionMode.FULL（完全モード）
         """
         self.model_provider = model_provider.lower()  # "anthropic" or "gemini"
+        self.connection_mode = connection_mode
         self.session_manager = SessionManager()
         self.tool_manager = None
-        
-        # Initialize model handlers
+
+        # 会話履歴の追跡用（LangChain対応）
+        self.conversation_history = []
+
+        # Initialize model handlers with LangChain support
         if self.model_provider == "anthropic":
             self.anthropic_handler = AnthropicModelHandler()
             self.gemini_handler = None
+            print("LangChain対応のAnthropicモデルハンドラーを初期化しました")
         else:
             # Default to Gemini
             self.gemini_handler = GeminiModelHandler()
             self.anthropic_handler = None
-            
+            print("LangChain対応のGeminiモデルハンドラーを初期化しました")
+
         # Services will be initialized after server connection
         self.github_service = None
         self.notion_service = None
@@ -84,22 +107,22 @@ class MCPClient:
             tools = await self.session_manager.connect_to_server_by_name(server_name)
         elif server_script_path:
             # Connect using script path
-            tools = await self.session_manager.connect_to_server_by_script(server_script_path)
+            tools = await self.session_manager.connect_to_server_by_script(
+                server_script_path
+            )
         else:
             raise ValueError("Must provide either server_name or server_script_path")
 
         # Initialize tool manager
         self.tool_manager = ToolManager(
-            self.session_manager.session, 
-            self.session_manager.default_channel_id
+            self.session_manager.session, self.session_manager.default_channel_id
         )
-        
+
         # Initialize services
         self.github_service = GitHubService(self.tool_manager)
         self.notion_service = NotionService(self.tool_manager)
         self.slack_service = SlackService(
-            self.tool_manager, 
-            self.session_manager.default_channel_id
+            self.tool_manager, self.session_manager.default_channel_id
         )
 
     async def process_query(
@@ -107,6 +130,7 @@ class MCPClient:
     ) -> str:
         """
         ユーザークエリを処理し、適切なモデルとサーバーを使用して応答を生成
+        LangChainを使用して処理を行う
 
         このメソッドは、入力クエリを分析し、クロスサーバー操作が必要かどうかを判断します。
         クエリの内容に基づいて、適切なモデル（GeminiまたはClaude）での処理を選択します。
@@ -119,6 +143,25 @@ class MCPClient:
         Returns:
             str: モデルやツールによって生成された応答
         """
+        # 会話履歴に追加（LangChain対応）
+        self.conversation_history.append(HumanMessage(content=query))
+
+        # 簡易モードの場合はツールなしで直接モデルで処理
+        if self.connection_mode == ConnectionMode.SIMPLE:
+            if self.model_provider == "anthropic":
+                # 簡易モードでのAnthropicの処理（LangChain経由）
+                result = await self.anthropic_handler.process_query_simple(query)
+                # 応答を会話履歴に追加
+                self.conversation_history.append(AIMessage(content=result))
+                return result
+            else:
+                # 簡易モードでのGeminiの処理（LangChain経由）
+                result = await self.gemini_handler.process_query_simple(query)
+                # 応答を会話履歴に追加
+                self.conversation_history.append(AIMessage(content=result))
+                return result
+
+        # 完全モードでの処理 (MCPサーバー接続)
         # Get available tools in JSON Schema format
         tools = await self.tool_manager.list_available_tools()
 
@@ -130,30 +173,48 @@ class MCPClient:
             or ("問題" in query and "修正" in query)
         ):
             # This might be a cross-server operation
-            return await self._process_cross_server_query(query, thread_ts, user_id)
+            result = await self._process_cross_server_query(query, thread_ts, user_id)
+            # 応答を会話履歴に追加
+            self.conversation_history.append(AIMessage(content=result))
+            return result
         elif self.model_provider == "anthropic":
-            # Process with Anthropic (Claude)
+            # Process with Anthropic (Claude) using LangChain
             async def tool_executor(tool_name, tool_args):
                 return await self.tool_manager.execute_tool(tool_name, tool_args)
-            
+
+            # LangChain経由でAnthropicの処理
             result = await self.anthropic_handler.process_query(
                 query, tools, tool_executor
             )
 
+            # 応答を会話履歴に追加
+            self.conversation_history.append(AIMessage(content=result))
+
             # If we have thread_ts and user_id, it's a Slack message we should reply to
             if thread_ts and user_id and self.session_manager.current_server == "slack":
-                await self.slack_service.reply_to_slack_thread(result, thread_ts, user_id)
+                await self.slack_service.reply_to_slack_thread(
+                    result, thread_ts, user_id
+                )
 
             return result
         else:
-            # Process with Gemini
+            # Process with Gemini using LangChain
+            async def tool_executor(tool_name, tool_args):
+                return await self.tool_manager.execute_tool(tool_name, tool_args)
+
+            # LangChain経由でGeminiの処理
             result = await self.gemini_handler.process_query(
-                query, tools, self.session_manager.default_channel_id
+                query, tools, tool_executor, self.session_manager.default_channel_id
             )
+
+            # 応答を会話履歴に追加
+            self.conversation_history.append(AIMessage(content=result))
 
             # If we have thread_ts and user_id, it's a Slack message we should reply to
             if thread_ts and user_id and self.session_manager.current_server == "slack":
-                await self.slack_service.reply_to_slack_thread(result, thread_ts, user_id)
+                await self.slack_service.reply_to_slack_thread(
+                    result, thread_ts, user_id
+                )
 
             return result
 
@@ -177,7 +238,7 @@ class MCPClient:
         """
         # Store current connection
         original_server = self.session_manager.current_server
-        
+
         result_text = []
         result_text.append("複数サーバー間の操作を実行します...")
 
@@ -204,7 +265,7 @@ class MCPClient:
                 if need_task_creation:
                     await self.cleanup()  # Close GitHub connection
                     result_text.append("Notionサーバーに接続中...")
-                    await self.connect_to_server(server_name="notionApi")
+                    await self.connect_to_server(server_name="notion")
                     result_text.append("Notion接続成功")
 
                     # Create task in Notion
@@ -271,6 +332,15 @@ class MCPClient:
         print("\nMCP Client Started!")
         print("Type your queries or 'quit' to exit.")
         print(f"Using model provider: {self.model_provider}")
+        print(f"Connection mode: {self.connection_mode.value}")
+
+        # 簡易モードの場合は追加の情報を表示
+        if self.connection_mode == ConnectionMode.SIMPLE:
+            print("Running in SIMPLE mode - direct model access without MCP tools")
+        else:
+            print("Running in FULL mode - connected to MCP server with tools")
+            if self.session_manager.current_server:
+                print(f"Connected to server: {self.session_manager.current_server}")
 
         while True:
             try:
@@ -314,9 +384,19 @@ async def main():
         None
     """
     parser = argparse.ArgumentParser(description="MCP Client")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--server", "-s", help="Server name from schema (e.g., slack)")
-    group.add_argument("--path", "-p", help="Path to server script file")
+    connection_group = parser.add_argument_group("Connection Options")
+    server_group = connection_group.add_mutually_exclusive_group()
+    server_group.add_argument(
+        "--server", "-s", help="Server name from schema (e.g., slack)"
+    )
+    server_group.add_argument("--path", "-p", help="Path to server script file")
+
+    parser.add_argument(
+        "--mode",
+        choices=["simple", "full"],
+        default="full",
+        help="Connection mode: 'simple' for direct script execution or 'full' for MCP server connection (default: full)",
+    )
     parser.add_argument(
         "--model",
         "-m",
@@ -341,12 +421,23 @@ async def main():
     )
     args = parser.parse_args()
 
-    client = MCPClient(model_provider=args.model)
+    # 接続モードの設定
+    connection_mode = (
+        ConnectionMode.SIMPLE if args.mode == "simple" else ConnectionMode.FULL
+    )
+
+    # サーバー名またはパスが指定されていない場合、必要に応じて要求
+    if connection_mode == ConnectionMode.FULL and not (args.server or args.path):
+        parser.error("Full connection mode requires --server or --path")
+
+    client = MCPClient(model_provider=args.model, connection_mode=connection_mode)
     try:
-        if args.server:
-            await client.connect_to_server(server_name=args.server)
-        else:
-            await client.connect_to_server(server_script_path=args.path)
+        # 接続モードに応じてサーバー接続（完全モードのみ）
+        if connection_mode == ConnectionMode.FULL:
+            if args.server:
+                await client.connect_to_server(server_name=args.server)
+            else:
+                await client.connect_to_server(server_script_path=args.path)
 
         # Check if we're in non-interactive mode
         if args.query:
