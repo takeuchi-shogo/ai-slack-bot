@@ -8,7 +8,8 @@
     "editor.defaultFormatter": "charliermarsh.ruff"
   },
   "python.analysis.extraPaths": [
-    "/Users/takeuchishougo/dev-app/ai-agent/.venv/lib/python3.13/site-packages"
+    "/Users/takeuchishougo/dev-app/ai-agent/.venv/lib/python3.13/site-packages",
+    "/Users/takeuchishougo/dev-app/ai-agent/ai_agent_v2/mcp-client/.venv/lib/python3.13/site-packages",
   ],
   "python.analysis.inlayHints.functionReturnTypes": true,
   "python.analysis.inlayHints.variableTypes": true,

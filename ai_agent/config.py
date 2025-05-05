@@ -39,8 +39,8 @@ class Settings(BaseSettings):
     DB_HOST: str = Field(default="localhost")
     DB_PORT: int = Field(default=3306)
     DB_NAME: str = Field(default="slack_bot")
-    DB_USER: str = Field(default="root")
-    DB_PASSWORD: str = Field(default="")
+    DB_USER: str = Field(default="user")
+    DB_PASSWORD: str = Field(default="password")
 
     class Config:
         env_file = ".env"

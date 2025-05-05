@@ -4,3 +4,16 @@ tasks:
   slack-bot:
     cmds:
       - cd slack_bot && go run cmd/main.go
+
+  # マイグレーション
+  # create-migration:
+  #   cmds:
+  #     - cd migrations && migrate create -ext sql -dir migrations/schema -seq $MIGRATION_NAME
+
+  # migrate-up:
+  #   cmds:
+  #     - migrate -path migrations/schema -database $DATABASE_URL up
+
+  # migrate-down:
+  #   cmds:
+  #     - migrate -path migrations/schema -database $DATABASE_URL down

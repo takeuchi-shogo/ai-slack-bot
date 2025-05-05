@@ -17,6 +17,11 @@ mcp-client/
 │   ├── base.py (ベースクラスと共通機能)
 │   ├── session.py (サーバー接続とセッション管理)
 │   └── utils.py (ユーティリティ関数)
+├── database/
+│   ├── __init__.py
+│   ├── agent.py (データベースクエリエージェント)
+│   ├── connection.py (データベース接続管理)
+│   └── query.py (自然言語→SQL変換)
 ├── models/
 │   ├── __init__.py
 │   ├── anthropic.py (Anthropic/Claude関連)
@@ -104,6 +109,30 @@ graph TD
     class F,G,H api;
 ```
 
+### データベース連携アーキテクチャ
+
+```mermaid
+graph TD
+    A[ユーザー] --> B[MCP クライアント]
+    B --> C[LLM (Claude/Gemini)]
+    B --> D[データベースエージェント]
+    D --> E[自然言語→SQL変換]
+    D --> F[データベース接続]
+    F --> G[データベース\nMySQL/PostgreSQL/SQLite]
+    
+    classDef user fill:#d0e0ff,stroke:#333,stroke-width:1px;
+    classDef client fill:#ffe6cc,stroke:#333,stroke-width:1px;
+    classDef llm fill:#fff2cc,stroke:#333,stroke-width:1px;
+    classDef db fill:#d5e8d4,stroke:#333,stroke-width:1px;
+    classDef service fill:#f8cecc,stroke:#333,stroke-width:1px;
+    
+    class A user;
+    class B client;
+    class C llm;
+    class D,E,F db;
+    class G service;
+```
+
 ## 処理フロー
 
 ### 基本的な処理フロー
@@ -182,6 +211,42 @@ sequenceDiagram
     Client->>User: 処理結果報告
 ```
 
+### データベースクエリ処理フロー
+
+```mermaid
+sequenceDiagram
+    participant User as ユーザー
+    participant Client as MCPクライアント
+    participant Agent as データベースエージェント
+    participant LLM as LLM (Claude/Gemini)
+    participant NL2SQL as 自然言語→SQL変換
+    participant DB as データベース
+    
+    User->>Client: 自然言語クエリ
+    Client->>Agent: クエリ分析要求
+    Agent->>LLM: クエリがDB関連か判断要求
+    LLM->>Agent: 判断結果
+    
+    alt DBクエリと判断された場合
+        Agent->>NL2SQL: SQL生成要求
+        NL2SQL->>DB: スキーマ情報取得
+        DB->>NL2SQL: スキーマ情報
+        NL2SQL->>LLM: SQL生成
+        LLM->>NL2SQL: 生成されたSQL
+        NL2SQL->>DB: SQLクエリ実行
+        DB->>NL2SQL: クエリ結果
+        NL2SQL->>LLM: 結果の日本語説明要求
+        LLM->>NL2SQL: 日本語説明
+        NL2SQL->>Agent: クエリ結果と説明
+        Agent->>Client: 処理結果
+    else 非DBクエリの場合
+        Agent->>Client: 非DBクエリとして報告
+        Client->>LLM: 通常の処理へ
+    end
+    
+    Client->>User: 応答表示
+```
+
 ## 主要クラスとモジュール
 
 ### メインクラス
@@ -221,12 +286,27 @@ sequenceDiagram
 - **NotionService**: Notion連携機能
 - **SlackService**: Slack連携機能
 
+### データベースモジュール (database/)
+
+- **DatabaseConnection**: データベース接続を管理するクラス
+  - `connect()`: データベースに接続
+  - `execute_raw_query()`: SQLクエリを実行
+  - `get_schema_info()`: データベーススキーマの説明を取得
+  - LangChainのSQLDatabaseを内部的に使用
+- **NaturalLanguageQueryProcessor**: 自然言語からSQLクエリを生成するクラス
+  - `process_query()`: 自然言語クエリを処理しSQL実行結果を返す
+  - LangChainのSQL生成チェーンを使用
+- **DatabaseQueryAgent**: 自然言語でデータベースに問い合わせるエージェント
+  - `is_database_query()`: クエリがデータベース関連かを判断
+  - `process_query()`: 適切な処理を選択して実行
+
 ### 設定モジュール (config.py)
 
 - 環境変数の管理
 - モデル設定
 - LangChain関連の設定（温度、トークン制限、システムプロンプト）
 - サーバースキーマの読み込み
+- データベース設定（タイプ、接続情報、スキーマ説明）
 
 ## 使用方法
 
@@ -282,6 +362,10 @@ uv run client.py --server slack --model anthropic
 - `langchain-anthropic`: LangChainとAnthropic Claude APIの連携
 - `langchain-google-genai`: LangChainとGoogle Gemini APIの連携
 - `langchain-core`: LangChainのコア機能（プロンプト、チェーン、出力処理など）
+- `langchain-sql`: LangChainのSQL生成と実行機能
+- `sqlalchemy`: データベース操作のためのORMとSQLツールキット
+- `mysqlclient`: MySQLデータベースドライバ
+- `psycopg2-binary`: PostgreSQLデータベースドライバ
 
 ## 拡張性
 
@@ -292,6 +376,35 @@ uv run client.py --server slack --model anthropic
 3. 必要に応じてクロスサーバー処理ロジックを拡張
 4. ツール呼び出し処理を実装
 
+### データベース機能の設定
+
+データベースへの接続と自然言語クエリ機能を使用するには：
+
+1. 環境変数で接続情報を設定：
+   ```
+   DB_TYPE=mysql  # mysql, postgresql, sqlite のいずれか
+   DB_HOST=localhost
+   DB_PORT=3306
+   DB_USER=username
+   DB_PASSWORD=password
+   DB_NAME=your_database
+   DB_SCHEMA_DESCRIPTION="データベースのテーブルと列に関する説明"  # オプション
+   ```
+
+2. サポートされているデータベース：
+   - MySQL
+   - PostgreSQL
+   - SQLite
+
+3. 使用例：
+   ```
+   # 自然言語でデータベース検索
+   uv run client.py --mode simple --model anthropic
+   > データベースの全ユーザー数を教えて
+   > アクティブなプロジェクトを開始日の新しい順に5件表示して
+   > user_idが10のユーザーが担当しているタスクの完了率は？
+   ```
+
 ### クロスサーバーフロー拡張
 
 クロスサーバーフローのパターンを拡張して、GitHub→Notion→Slackだけでなく、他のサービス組み合わせも実装可能です：
@@ -299,6 +412,7 @@ uv run client.py --server slack --model anthropic
 - Notion→GitHub（例：タスクからプルリクエスト作成）
 - Slack→GitHub→Slack（例：会話内容からコード生成してPRを作成）
 - GitHub→Notion→Email（例：バグ報告と修正タスク作成、担当者へ通知）
+- Slack→データベース→Slack（例：会話内容からデータ検索して結果を投稿）
 
 ## 参考URL
 
@@ -307,3 +421,6 @@ uv run client.py --server slack --model anthropic
 - [Google Gemini API](https://ai.google.dev/docs)
 - [LangChain](https://www.langchain.com/)
 - [LangChain ドキュメント](https://python.langchain.com/docs/get_started/introduction)
+- [LangChain SQL ドキュメント](https://python.langchain.com/docs/modules/chains/popular/sqlite)
+- [SQLAlchemy ドキュメント](https://docs.sqlalchemy.org/)
+- [自然言語からSQLへの変換](https://python.langchain.com/docs/use_cases/sql/sql_database)

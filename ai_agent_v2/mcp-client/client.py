@@ -4,14 +4,20 @@ MCPクライアントメインモジュール
 Model Context Protocol (MCP) サーバーとの通信と連携を管理する
 メインクラスと実行エントリーポイントを提供します
 LangChainを使用したAIエージェントに対応
+データベースへの自然言語クエリ機能を含む
 """
 
 import argparse
 import asyncio
+import logging
 from enum import Enum
 
 # Core modules
 from core.session import SessionManager
+from database.agent import DatabaseQueryAgent
+
+# Database modules
+from database.connection import DatabaseConnection
 
 # LangChain dependencies
 from langchain_core.messages import AIMessage, HumanMessage
@@ -25,6 +31,11 @@ from services.github import GitHubService
 from services.notion import NotionService
 from services.slack import SlackService
 from tools.handlers import ToolManager
+
+# ロギング設定
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 
 
 class ConnectionMode(Enum):
@@ -40,6 +51,7 @@ class MCPClient:
 
     このクラスは、SlackやGitHubなどのMCPサーバーとの接続、
     大規模言語モデル(LLM)との統合、そしてユーザークエリの処理を行います。
+    データベースへの自然言語クエリ機能もサポートしています。
 
     Attributes:
         session_manager: MCPサーバーとのセッション管理
@@ -51,6 +63,8 @@ class MCPClient:
         github_service: GitHubサービス
         notion_service: Notionサービス
         slack_service: Slackサービス
+        db_connection: データベース接続
+        db_agent: データベースクエリエージェント
     """
 
     def __init__(self, model_provider="gemini", connection_mode=ConnectionMode.FULL):
@@ -72,6 +86,10 @@ class MCPClient:
         # 会話履歴の追跡用（LangChain対応）
         self.conversation_history = []
 
+        # DB関連の初期化
+        self.db_connection = DatabaseConnection()
+        self.db_agent = None
+
         # Initialize model handlers with LangChain support
         if self.model_provider == "anthropic":
             self.anthropic_handler = AnthropicModelHandler()
@@ -87,6 +105,34 @@ class MCPClient:
         self.github_service = None
         self.notion_service = None
         self.slack_service = None
+
+    async def initialize_database(self):
+        """データベース関連の機能を初期化"""
+        try:
+            # データベースに接続
+            connected = await self.db_connection.connect()
+            if not connected:
+                logging.warning(
+                    "データベースに接続できませんでした。データベース機能は無効になります。"
+                )
+                return False
+
+            # 使用するLLMを取得
+            llm = (
+                self.anthropic_handler.llm
+                if self.model_provider == "anthropic"
+                else self.gemini_handler.llm
+            )
+
+            # データベースエージェントを初期化
+            self.db_agent = DatabaseQueryAgent(llm, self.db_connection)
+            await self.db_agent.initialize()
+
+            logging.info("データベース機能が初期化されました")
+            return True
+        except Exception as e:
+            logging.error(f"データベース初期化エラー: {str(e)}")
+            return False
 
     async def connect_to_server(
         self, server_name: str = None, server_script_path: str = None
@@ -145,6 +191,34 @@ class MCPClient:
         """
         # 会話履歴に追加（LangChain対応）
         self.conversation_history.append(HumanMessage(content=query))
+
+        # データベースクエリの検出と処理
+        if self.db_agent:
+            try:
+                # データベースクエリかどうかを判断
+                is_db_query = await self.db_agent.is_database_query(query)
+
+                if is_db_query:
+                    logging.info(f"データベースクエリと判断されました: {query}")
+
+                    # データベースクエリを処理
+                    db_result = await self.db_agent.process_query(query)
+
+                    # 結果に基づいて応答を生成
+                    if "error" in db_result:
+                        result = f"データベースクエリ処理中にエラーが発生しました: {db_result['error']}"
+                    else:
+                        if "explanation" in db_result:
+                            result = db_result["explanation"]
+                        else:
+                            result = f"クエリの結果: {db_result['raw_result']}"
+
+                    # 応答を会話履歴に追加
+                    self.conversation_history.append(AIMessage(content=result))
+                    return result
+            except Exception as e:
+                logging.error(f"データベースクエリ処理エラー: {str(e)}")
+                # エラーが発生した場合は標準の処理に戻る
 
         # 簡易モードの場合はツールなしで直接モデルで処理
         if self.connection_mode == ConnectionMode.SIMPLE:
@@ -432,6 +506,9 @@ async def main():
 
     client = MCPClient(model_provider=args.model, connection_mode=connection_mode)
     try:
+        # データベース機能の初期化
+        await client.initialize_database()
+
         # 接続モードに応じてサーバー接続（完全モードのみ）
         if connection_mode == ConnectionMode.FULL:
             if args.server:
