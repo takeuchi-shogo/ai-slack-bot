@@ -1,25 +1,36 @@
-# MCP Client
+# MCP Client with LangGraph マルチエージェントシステム
 
 ## 概要
 
 MCP Client は、Model Context Protocol (MCP) サーバーと通信するための Python クライアントです。SlackやGitHub、Notionなどの外部サービスとの連携を可能にし、大規模言語モデル（LLM）を使用してこれらのサービスとインタラクションできます。コードの問題を検出し、Notionにタスクを作成し、Slackで結果を共有するクロスサーバーワークフローをサポートします。
 
-LangChainフレームワークを活用しており、モデルとツールの連携を効率的に実現します。簡易モードと完全モードの2つの動作モードに対応し、外部サービスへのアクセスなしでモデルを直接利用することも、フルAPIアクセスを行うこともできます。
+LangChainフレームワークを活用しており、モデルとツールの連携を効率的に実現します。また、**LangGraph**を使用したマルチエージェントシステムを実装しており、複数の専門エージェントが協調して動作します。
+
+クライアントは以下の動作モードをサポートしています：
+- **接続モード**: 簡易モード（外部サービス連携なし）と完全モード（フルAPI連携）
+- **操作モード**: LangChainモード（単一エージェント）とLangGraphモード（マルチエージェント）
 
 ## コード構成
 
 ```
 mcp-client/
 ├── client.py (メインエントリーポイント)
-├── config.py (設定管理)
+├── config.py (設定管理とエージェントプロンプト)
 ├── core/
 │   ├── __init__.py
 │   ├── base.py (ベースクラスと共通機能)
+│   ├── graph.py (LangGraphによるマルチエージェント管理)
 │   ├── session.py (サーバー接続とセッション管理)
 │   └── utils.py (ユーティリティ関数)
+├── agents/
+│   ├── __init__.py
+│   ├── db_agent.py (データベースクエリエージェント)
+│   ├── github_agent.py (GitHub調査エージェント)
+│   ├── notion_agent.py (Notionタスク作成エージェント)
+│   └── slack_agent.py (Slack応答エージェント)
 ├── database/
 │   ├── __init__.py
-│   ├── agent.py (データベースクエリエージェント)
+│   ├── agent.py (データベースクエリエージェント - 旧版)
 │   ├── connection.py (データベース接続管理)
 │   └── query.py (自然言語→SQL変換)
 ├── models/
@@ -43,6 +54,35 @@ mcp-client/
 ## アーキテクチャ
 
 ### 基本アーキテクチャ
+
+#### LangGraph マルチエージェントアーキテクチャ
+
+```mermaid
+graph TD
+    A[ユーザークエリ] --> B[コントローラーエージェント]
+    B -->|DB関連| C[DBクエリエージェント]
+    B -->|コード問題| D[GitHubリサーチエージェント]
+    B -->|タスク作成| E[NotionタスクエージェントF]
+    B -->|一般質問| F[Slack応答エージェント]
+    C --> F
+    D --> E
+    D --> F
+    E --> F
+    
+    classDef user fill:#d0e0ff,stroke:#333,stroke-width:1px;
+    classDef controller fill:#ffe6cc,stroke:#333,stroke-width:1px;
+    classDef db fill:#d5e8d4,stroke:#333,stroke-width:1px;
+    classDef github fill:#fff2cc,stroke:#333,stroke-width:1px;
+    classDef notion fill:#f8cecc,stroke:#333,stroke-width:1px;
+    classDef slack fill:#e1d5e7,stroke:#333,stroke-width:1px;
+    
+    class A user;
+    class B controller;
+    class C db;
+    class D github;
+    class E notion;
+    class F slack;
+```
 
 #### 完全モード (Full Mode)
 
@@ -109,33 +149,48 @@ graph TD
     class F,G,H api;
 ```
 
-### データベース連携アーキテクチャ
-
-```mermaid
-graph TD
-    A[ユーザー] --> B[MCP クライアント]
-    B --> C[LLM (Claude/Gemini)]
-    B --> D[データベースエージェント]
-    D --> E[自然言語→SQL変換]
-    D --> F[データベース接続]
-    F --> G[データベース\nMySQL/PostgreSQL/SQLite]
-    
-    classDef user fill:#d0e0ff,stroke:#333,stroke-width:1px;
-    classDef client fill:#ffe6cc,stroke:#333,stroke-width:1px;
-    classDef llm fill:#fff2cc,stroke:#333,stroke-width:1px;
-    classDef db fill:#d5e8d4,stroke:#333,stroke-width:1px;
-    classDef service fill:#f8cecc,stroke:#333,stroke-width:1px;
-    
-    class A user;
-    class B client;
-    class C llm;
-    class D,E,F db;
-    class G service;
-```
-
 ## 処理フロー
 
-### 基本的な処理フロー
+### LangGraph マルチエージェント処理フロー
+
+```mermaid
+sequenceDiagram
+    participant User as ユーザー
+    participant Client as MCPクライアント
+    participant Controller as コントローラーエージェント
+    participant GithubAgent as GitHubリサーチエージェント
+    participant NotionAgent as Notionタスクエージェント
+    participant SlackAgent as Slack応答エージェント
+    
+    User->>Client: クエリ入力
+    Client->>Controller: クエリタイプ判定
+    Controller->>Client: クエリタイプ返答
+    
+    alt コード問題/タスク作成クエリ
+        Client->>GithubAgent: GitHubコード調査依頼
+        GithubAgent->>Client: コード分析結果
+        
+        alt タスク作成が必要
+            Client->>NotionAgent: タスク作成依頼
+            NotionAgent->>Client: タスク作成結果
+        end
+        
+        Client->>SlackAgent: 応答整形・送信依頼
+        SlackAgent->>Client: 最終応答
+    else データベースクエリ
+        Client->>DBAgent: データベース処理依頼
+        DBAgent->>Client: クエリ結果
+        Client->>SlackAgent: 応答整形・送信依頼
+        SlackAgent->>Client: 最終応答
+    else 一般クエリ
+        Client->>SlackAgent: 応答整形・送信依頼
+        SlackAgent->>Client: 最終応答
+    end
+    
+    Client->>User: 応答表示
+```
+
+### 基本的な処理フロー（旧版LangChainモード）
 
 #### 完全モードの処理フロー
 
@@ -174,41 +229,6 @@ sequenceDiagram
     LLM->>LLM: クエリ処理
     LLM->>Client: 応答生成
     Client->>User: 結果表示
-```
-
-### クロスサーバー処理フロー（GitHub → Notion → Slack）
-
-```mermaid
-sequenceDiagram
-    participant User as ユーザー
-    participant Client as MCPクライアント
-    participant GitHub as GitHubサーバー
-    participant Notion as Notionサーバー
-    participant Slack as Slackサーバー
-    
-    User->>Client: コード問題に関するクエリ
-    Client->>GitHub: 接続
-    Client->>GitHub: コード検索・分析要求
-    GitHub->>Client: コード情報・問題分析結果
-    Client->>GitHub: 切断
-    
-    alt 問題が検出された場合
-        Client->>Notion: 接続
-        Client->>Notion: タスク作成要求
-        Notion->>Client: タスク作成結果
-        Client->>Notion: 切断
-    end
-    
-    Client->>Slack: 接続
-    
-    alt スレッド返信の場合
-        Client->>Slack: スレッドにメンション付き返信
-    else 新規メッセージの場合
-        Client->>Slack: 結果要約を投稿
-    end
-    
-    Slack->>Client: 投稿結果
-    Client->>User: 処理結果報告
 ```
 
 ### データベースクエリ処理フロー
@@ -251,86 +271,76 @@ sequenceDiagram
 
 ### メインクラス
 
-- **MCPClient**: メインのクライアントクラスで、簡易モードと完全モードの両方を処理します
+- **MCPClient**: メインのクライアントクラス
   - 接続モード: `ConnectionMode.SIMPLE`（簡易モード）または`ConnectionMode.FULL`（完全モード）
+  - 操作モード: `OperationMode.LANGCHAIN`（単一エージェント）または`OperationMode.LANGGRAPH`（マルチエージェント）
   - モデルプロバイダー: `anthropic`（Claude）または`gemini`（Google Gemini）
-  - 簡易モードでは直接モデルAPIを呼び出し、完全モードではサーバー接続と複雑な操作を処理します
-  - LangChain統合: 会話履歴の追跡、プロンプト管理、ツール連携を実現
+  - LangChainとLangGraph統合: 会話履歴の追跡、プロンプト管理、ツール連携、マルチエージェント管理
+
+### LangGraphモジュール (core/graph.py)
+
+- **GraphManager**: LangGraphを使用したマルチエージェントのグラフ管理
+  - マルチエージェント間の状態共有と制御フローを管理
+  - `AgentType`: CONTROLLER, DB_QUERY, GITHUB_RESEARCH, NOTION_TASK, SLACK_RESPONSE
+  - `QueryType`: GENERAL, DB_QUERY, CODE_ISSUE, TASK_CREATION
+
+### エージェントモジュール (agents/)
+
+- **DBQueryAgent**: 自然言語からSQLを生成し、データベース検索を実行
+- **GitHubResearchAgent**: GitHubリポジトリのコードを分析し、問題を特定
+- **NotionTaskAgent**: GitHubリサーチ結果からNotionタスクを作成
+- **SlackResponseAgent**: 各エージェントの結果を受け取り、ユーザーに適切な応答を生成
 
 ### コアモジュール (core/)
 
 - **BaseMCPClient**: 基本的なセッション管理とクリーンアップ機能を提供
 - **SessionManager**: MCPサーバーとの接続管理、LangChainツールの準備と管理
-- **ServerConnector**: サーバーパラメータ生成
-- **MCPToolWrapper**: MCPツールをLangChainのToolとしてラップする
 
 ### モデルモジュール (models/)
 
-- **AnthropicModelHandler**: LangChain経由でClaude APIを利用した処理（簡易モード・完全モード対応）
-  - `process_query_simple`: 簡易モードでの処理
-  - `process_query`: 完全モードでの処理（ツール利用）
-  - `process_structured_query`: JSON形式の構造化出力を生成
-- **GeminiModelHandler**: LangChain経由でGemini APIを利用した処理（簡易モード・完全モード対応）
-  - `process_query_simple`: 簡易モードでの処理
-  - `process_query`: 完全モードでの処理（ツール利用）
-  - `process_structured_query`: JSON形式の構造化出力を生成
-
-### ツールモジュール (tools/)
-
-- **ToolManager**: MCPツールの管理と呼び出し、LangChainツールの生成と管理
-- **LangChainToolAdapter**: MCPツールをLangChainのToolとして利用するためのアダプターを提供
-
-### サービスモジュール (services/)
-
-- **GitHubService**: GitHub連携機能
-- **NotionService**: Notion連携機能
-- **SlackService**: Slack連携機能
+- **AnthropicModelHandler**: LangChain経由でClaude APIを利用した処理
+- **GeminiModelHandler**: LangChain経由でGemini APIを利用した処理
 
 ### データベースモジュール (database/)
 
 - **DatabaseConnection**: データベース接続を管理するクラス
-  - `connect()`: データベースに接続
-  - `execute_raw_query()`: SQLクエリを実行
-  - `get_schema_info()`: データベーススキーマの説明を取得
-  - LangChainのSQLDatabaseを内部的に使用
 - **NaturalLanguageQueryProcessor**: 自然言語からSQLクエリを生成するクラス
-  - `process_query()`: 自然言語クエリを処理しSQL実行結果を返す
-  - LangChainのSQL生成チェーンを使用
-- **DatabaseQueryAgent**: 自然言語でデータベースに問い合わせるエージェント
-  - `is_database_query()`: クエリがデータベース関連かを判断
-  - `process_query()`: 適切な処理を選択して実行
 
 ### 設定モジュール (config.py)
 
 - 環境変数の管理
 - モデル設定
 - LangChain関連の設定（温度、トークン制限、システムプロンプト）
-- サーバースキーマの読み込み
-- データベース設定（タイプ、接続情報、スキーマ説明）
+- **エージェントプロンプト**: 各エージェントのプロンプトを一元管理
 
 ## 使用方法
 
 ### 動作モード
 
-MCPクライアントには2つの動作モードがあります：
+MCPクライアントには2つの接続モードと2つの操作モードがあります：
 
-- **簡易モード (simple)**: 外部サービスに接続せず、LLMに直接クエリを送信します。API連携を必要としない簡単な質問や会話に適しています。
-- **完全モード (full)**: MCPサーバーを介して外部サービス（Slack、GitHub、Notion）に接続し、APIツールを利用した高度な機能を提供します。
+- **接続モード**:
+  - **簡易モード (simple)**: 外部サービスに接続せず、LLMに直接クエリを送信
+  - **完全モード (full)**: MCPサーバーを介して外部サービスに接続し、APIツールを活用
+
+- **操作モード**:
+  - **LangChainモード (langchain)**: 単一エージェントとして動作し、従来の実装アプローチを使用
+  - **LangGraphモード (langgraph)**: マルチエージェントシステムとして動作し、専門エージェント間で協調処理
 
 ### 基本的なコマンド
 
 ```bash
-# 簡易モード - Gemini (外部サービス連携なし)
-uv run client.py --mode simple --model gemini
+# LangGraphモード（デフォルト） - 完全モード - Slack接続
+uv run client.py --mode full --server slack --operation langgraph --model anthropic
 
-# 簡易モード - Claude (外部サービス連携なし)
-uv run client.py --mode simple --model anthropic
+# LangChainモード - 完全モード - Slack接続
+uv run client.py --mode full --server slack --operation langchain --model anthropic
 
-# 完全モード - Gemini - Slackサーバーに接続
-uv run client.py --mode full --server slack --model gemini
+# LangGraphモード - 簡易モード（外部サービス連携なし）
+uv run client.py --mode simple --operation langgraph --model anthropic
 
-# 完全モード - Claude - Slackサーバーに接続
-uv run client.py --mode full --server slack --model anthropic
+# LangChainモード - 簡易モード（外部サービス連携なし）
+uv run client.py --mode simple --operation langchain --model anthropic
 
 # 完全モード - GitHubサーバーに接続
 uv run client.py --mode full --server github
@@ -342,39 +352,60 @@ uv run client.py --mode full --server notion
 uv run client.py --mode full --server slack --query "コード検索とタスク作成をしてください" --thread "1620841956.009700" --user "U01ABC123"
 ```
 
-### 互換性のため、以下の従来のコマンドもサポート（--modeオプションなし、デフォルトで完全モード）
+### 互換性のため以下の従来のコマンドもサポート
 
 ```bash
-# 完全モード - Gemini - Slackサーバーに接続
+# 完全モード - LangGraphモード（デフォルト） - Slackサーバーに接続
 uv run client.py --server slack
 
-# 完全モード - Claude - Slackサーバーに接続
+# 完全モード - LangGraphモード（デフォルト） - Claude - Slackサーバーに接続
 uv run client.py --server slack --model anthropic
 ```
 
 ## 依存関係
 
-- `anthropic`: Claude APIとの通信
-- `google-generativeai`: Gemini APIとの通信
-- `mcp`: Model Context Protocol実装
-- `python-dotenv`: 環境変数の読み込み
-- `langchain`: LLMやツールを組み合わせるためのフレームワーク
-- `langchain-anthropic`: LangChainとAnthropic Claude APIの連携
-- `langchain-google-genai`: LangChainとGoogle Gemini APIの連携
-- `langchain-core`: LangChainのコア機能（プロンプト、チェーン、出力処理など）
-- `langchain-sql`: LangChainのSQL生成と実行機能
-- `sqlalchemy`: データベース操作のためのORMとSQLツールキット
-- `mysqlclient`: MySQLデータベースドライバ
-- `psycopg2-binary`: PostgreSQLデータベースドライバ
+- **LangChain関連**
+  - `langchain`: LLMやツールを組み合わせるためのフレームワーク
+  - `langchain-anthropic`: LangChainとAnthropic Claude APIの連携
+  - `langchain-google-genai`: LangChainとGoogle Gemini APIの連携
+  - `langchain-core`: LangChainのコア機能
+  - `langchain-sql`: LangChainのSQL生成と実行機能
+
+- **LangGraph関連**
+  - `langgraph`: マルチエージェントシステム構築フレームワーク
+
+- **モデルAPI**
+  - `anthropic`: Claude APIとの通信
+  - `google-generativeai`: Gemini APIとの通信
+
+- **MCP関連**
+  - `mcp`: Model Context Protocol実装
+  - `python-dotenv`: 環境変数の読み込み
+
+- **データベース関連**
+  - `sqlalchemy`: データベース操作のためのORMとSQLツールキット
+  - `mysqlclient`: MySQLデータベースドライバ
+  - `psycopg2-binary`: PostgreSQLデータベースドライバ
 
 ## 拡張性
 
-このクライアントは、新しいMCPサーバーの追加が容易な設計になっています。新しいサービスを追加するには：
+### エージェントの追加
+
+LangGraphマルチエージェントシステムは拡張性を考慮して設計されています。新しいエージェントを追加するには：
+
+1. `agents/` ディレクトリに新しいエージェントクラスを作成
+2. `config.py` の `AGENT_PROMPTS` に新しいエージェント用のプロンプトを追加
+3. `core/graph.py` の `AgentType` に新しいエージェントタイプを追加
+4. `GraphManager` クラスの `initialize_agents` メソッドで新しいエージェントを初期化
+5. 必要に応じてグラフのエッジ構造を更新
+
+### サーバーの追加
+
+新しいMCPサーバーを追加するには：
 
 1. 対応するスキーマファイルを `schema` ディレクトリに追加
 2. 必要に応じて新しいサービスクラスを `services/` に追加
-3. 必要に応じてクロスサーバー処理ロジックを拡張
-4. ツール呼び出し処理を実装
+3. 必要に応じて新しいエージェントを `agents/` に追加
 
 ### データベース機能の設定
 
@@ -405,17 +436,36 @@ uv run client.py --server slack --model anthropic
    > user_idが10のユーザーが担当しているタスクの完了率は？
    ```
 
-### クロスサーバーフロー拡張
+## エージェントプロンプトのカスタマイズ
 
-クロスサーバーフローのパターンを拡張して、GitHub→Notion→Slackだけでなく、他のサービス組み合わせも実装可能です：
+各エージェントのプロンプトは `config.py` の `AGENT_PROMPTS` ディクショナリで一元管理されており、簡単に変更できます。
 
-- Notion→GitHub（例：タスクからプルリクエスト作成）
-- Slack→GitHub→Slack（例：会話内容からコード生成してPRを作成）
-- GitHub→Notion→Email（例：バグ報告と修正タスク作成、担当者へ通知）
-- Slack→データベース→Slack（例：会話内容からデータ検索して結果を投稿）
+例えば、GitHubリサーチエージェントのプロンプトを変更するには：
+
+```python
+AGENT_PROMPTS = {
+    # ... 他のプロンプト ...
+    
+    "github_research": """
+    あなたはGitHubリポジトリのコードを調査するAIエージェントです。
+    コードの問題を発見し、分析する専門家としての役割があります。
+    
+    # カスタマイズされた新しい指示をここに追加
+    1. セキュリティ脆弱性にも注目する
+    2. パフォーマンス最適化の提案を含める
+    3. コーディング規約違反も報告する
+    
+    分析結果は明確かつ具体的に説明し、問題の重大度も示してください。
+    コードのどの部分に問題があるのか、なぜ問題なのかを専門的な観点から説明してください。
+    """,
+    
+    # ... 他のプロンプト ...
+}
+```
 
 ## 参考URL
 
+- [LangGraph ドキュメント](https://langchain-ai.github.io/langgraph/)
 - [Model Context Protocol](https://modelcontextprotocol.io/quickstart/client)
 - [Anthropic Claude API](https://docs.anthropic.com/claude/reference/getting-started-with-the-api)
 - [Google Gemini API](https://ai.google.dev/docs)
@@ -423,4 +473,3 @@ uv run client.py --server slack --model anthropic
 - [LangChain ドキュメント](https://python.langchain.com/docs/get_started/introduction)
 - [LangChain SQL ドキュメント](https://python.langchain.com/docs/modules/chains/popular/sqlite)
 - [SQLAlchemy ドキュメント](https://docs.sqlalchemy.org/)
-- [自然言語からSQLへの変換](https://python.langchain.com/docs/use_cases/sql/sql_database)

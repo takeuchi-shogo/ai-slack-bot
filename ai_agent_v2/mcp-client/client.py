@@ -4,6 +4,7 @@ MCPクライアントメインモジュール
 Model Context Protocol (MCP) サーバーとの通信と連携を管理する
 メインクラスと実行エントリーポイントを提供します
 LangChainを使用したAIエージェントに対応
+LangGraphを使用したマルチエージェントシステムに対応
 データベースへの自然言語クエリ機能を含む
 """
 
@@ -13,6 +14,7 @@ import logging
 from enum import Enum
 
 # Core modules
+from core.graph import GraphManager
 from core.session import SessionManager
 from database.agent import DatabaseQueryAgent
 
@@ -45,6 +47,13 @@ class ConnectionMode(Enum):
     FULL = "full"  # 完全モード (MCPサーバーに接続)
 
 
+class OperationMode(Enum):
+    """操作モードを定義する列挙型"""
+
+    LANGCHAIN = "langchain"  # LangChainを使用した単一エージェントモード
+    LANGGRAPH = "langgraph"  # LangGraphを使用したマルチエージェントモード
+
+
 class MCPClient:
     """
     MCPクライアントクラス - Model Context Protocol (MCP) サーバーとの通信を管理
@@ -52,11 +61,13 @@ class MCPClient:
     このクラスは、SlackやGitHubなどのMCPサーバーとの接続、
     大規模言語モデル(LLM)との統合、そしてユーザークエリの処理を行います。
     データベースへの自然言語クエリ機能もサポートしています。
+    LangGraphを使用したマルチエージェントシステムにも対応しています。
 
     Attributes:
         session_manager: MCPサーバーとのセッション管理
         model_provider: 使用するLLMプロバイダー（"anthropic"または"gemini"）
         connection_mode: 接続モード（"simple"または"full"）
+        operation_mode: 操作モード（"langchain"または"langgraph"）
         anthropic_handler: Claude APIハンドラ
         gemini_handler: Gemini APIハンドラ
         tool_manager: ツール管理インスタンス
@@ -65,21 +76,31 @@ class MCPClient:
         slack_service: Slackサービス
         db_connection: データベース接続
         db_agent: データベースクエリエージェント
+        graph_manager: LangGraphグラフ管理インスタンス
     """
 
-    def __init__(self, model_provider="gemini", connection_mode=ConnectionMode.FULL):
+    def __init__(
+        self,
+        model_provider="anthropic",
+        connection_mode=ConnectionMode.FULL,
+        operation_mode=OperationMode.LANGGRAPH,
+    ):
         """
         MCPClientの初期化
-        LangChain対応のモデルハンドラーを初期化
+        LangChain/LangGraph対応のモデルハンドラーを初期化
 
         Args:
-            model_provider: 使用するLLMプロバイダー（デフォルト: "gemini"）
+            model_provider: 使用するLLMプロバイダー（デフォルト: "anthropic"）
                             "anthropic"または"gemini"が指定可能
             connection_mode: 接続モード（デフォルト: ConnectionMode.FULL）
                              ConnectionMode.SIMPLE（簡易モード）またはConnectionMode.FULL（完全モード）
+            operation_mode: 操作モード（デフォルト: OperationMode.LANGGRAPH）
+                            OperationMode.LANGCHAIN（単一エージェント）または
+                            OperationMode.LANGGRAPH（マルチエージェント）
         """
         self.model_provider = model_provider.lower()  # "anthropic" or "gemini"
         self.connection_mode = connection_mode
+        self.operation_mode = operation_mode
         self.session_manager = SessionManager()
         self.tool_manager = None
 
@@ -90,7 +111,10 @@ class MCPClient:
         self.db_connection = DatabaseConnection()
         self.db_agent = None
 
-        # Initialize model handlers with LangChain support
+        # LangGraph関連の初期化
+        self.graph_manager = None
+
+        # モデルハンドラーを初期化
         if self.model_provider == "anthropic":
             self.anthropic_handler = AnthropicModelHandler()
             self.gemini_handler = None
@@ -134,6 +158,32 @@ class MCPClient:
             logging.error(f"データベース初期化エラー: {str(e)}")
             return False
 
+    async def initialize_graph_manager(self):
+        """LangGraphマネージャーを初期化"""
+        try:
+            # 使用するLLMを取得
+            llm = (
+                self.anthropic_handler.llm
+                if self.model_provider == "anthropic"
+                else self.gemini_handler.llm
+            )
+
+            # LangGraphマネージャーを初期化
+            self.graph_manager = GraphManager(
+                model_provider=self.model_provider,
+                tool_manager=self.tool_manager,
+                db_connection=self.db_connection,
+            )
+
+            # LangGraphを構築
+            await self.graph_manager.build_graph()
+
+            logging.info("LangGraphマネージャーが初期化されました")
+            return True
+        except Exception as e:
+            logging.error(f"LangGraphマネージャー初期化エラー: {str(e)}")
+            return False
+
     async def connect_to_server(
         self, server_name: str = None, server_script_path: str = None
     ):
@@ -171,15 +221,17 @@ class MCPClient:
             self.tool_manager, self.session_manager.default_channel_id
         )
 
+        # LangGraphモードの場合はグラフマネージャーを初期化
+        if self.operation_mode == OperationMode.LANGGRAPH:
+            await self.initialize_graph_manager()
+
     async def process_query(
         self, query: str, thread_ts: str = None, user_id: str = None
     ) -> str:
         """
-        ユーザークエリを処理し、適切なモデルとサーバーを使用して応答を生成
-        LangChainを使用して処理を行う
+        ユーザークエリを処理し、適切なモデルとモードで応答を生成
 
-        このメソッドは、入力クエリを分析し、クロスサーバー操作が必要かどうかを判断します。
-        クエリの内容に基づいて、適切なモデル（GeminiまたはClaude）での処理を選択します。
+        LangChainモードとLangGraphモードによって処理が分岐します
 
         Args:
             query: ユーザーから入力されたクエリ文字列
@@ -189,8 +241,66 @@ class MCPClient:
         Returns:
             str: モデルやツールによって生成された応答
         """
-        # 会話履歴に追加（LangChain対応）
+        # 会話履歴に追加
         self.conversation_history.append(HumanMessage(content=query))
+
+        # LangGraphモードで処理
+        if self.operation_mode == OperationMode.LANGGRAPH:
+            return await self._process_query_with_langgraph(query, thread_ts, user_id)
+
+        # LangChainモードで処理
+        return await self._process_query_with_langchain(query, thread_ts, user_id)
+
+    async def _process_query_with_langgraph(
+        self, query: str, thread_ts: str = None, user_id: str = None
+    ) -> str:
+        """
+        LangGraphモードを使用してクエリを処理
+
+        マルチエージェントによる協調処理を行います
+
+        Args:
+            query: ユーザーから入力されたクエリ文字列
+            thread_ts: メッセージのスレッドタイムスタンプ（スレッド返信の場合）
+            user_id: ユーザーID（メンション付き返信の場合）
+
+        Returns:
+            str: マルチエージェントシステムによって生成された応答
+        """
+        logging.info(f"LangGraphモードでクエリを処理: {query}")
+
+        # グラフマネージャーがない場合は初期化
+        if not self.graph_manager:
+            await self.initialize_graph_manager()
+
+        # グラフを使用してクエリを処理
+        result = await self.graph_manager.process_query(query, user_id, thread_ts)
+
+        # 結果から応答を取得
+        response = result.get("response", "応答が生成されませんでした")
+
+        # 応答を会話履歴に追加
+        self.conversation_history.append(AIMessage(content=response))
+
+        return response
+
+    async def _process_query_with_langchain(
+        self, query: str, thread_ts: str = None, user_id: str = None
+    ) -> str:
+        """
+        LangChainモードを使用してクエリを処理
+
+        単一エージェントによる処理を行います（従来の実装方式）
+
+        Args:
+            query: ユーザーから入力されたクエリ文字列
+            thread_ts: メッセージのスレッドタイムスタンプ（スレッド返信の場合）
+            user_id: ユーザーID（メンション付き返信の場合）
+
+        Returns:
+            str: LangChainモデルによって生成された応答
+        """
+        logging.info(f"LangChainモードでクエリを処理: {query}")
 
         # データベースクエリの検出と処理
         if self.db_agent:
@@ -407,6 +517,7 @@ class MCPClient:
         print("Type your queries or 'quit' to exit.")
         print(f"Using model provider: {self.model_provider}")
         print(f"Connection mode: {self.connection_mode.value}")
+        print(f"Operation mode: {self.operation_mode.value}")
 
         # 簡易モードの場合は追加の情報を表示
         if self.connection_mode == ConnectionMode.SIMPLE:
@@ -439,8 +550,14 @@ class MCPClient:
         Returns:
             None
         """
+        # LangGraphリソースのクリーンアップ
+        if self.graph_manager:
+            await self.graph_manager.cleanup()
+
+        # セッションのクリーンアップ
         await self.session_manager.cleanup()
-        # Reset services
+
+        # サービスのリセット
         self.tool_manager = None
         self.github_service = None
         self.notion_service = None
@@ -472,11 +589,17 @@ async def main():
         help="Connection mode: 'simple' for direct script execution or 'full' for MCP server connection (default: full)",
     )
     parser.add_argument(
+        "--operation",
+        choices=["langchain", "langgraph"],
+        default="langgraph",
+        help="Operation mode: 'langchain' for single agent or 'langgraph' for multi-agent (default: langgraph)",
+    )
+    parser.add_argument(
         "--model",
         "-m",
-        default="gemini",
+        default="anthropic",
         choices=["gemini", "anthropic"],
-        help="Model provider to use (default: gemini)",
+        help="Model provider to use (default: anthropic)",
     )
     parser.add_argument(
         "--thread",
@@ -500,11 +623,23 @@ async def main():
         ConnectionMode.SIMPLE if args.mode == "simple" else ConnectionMode.FULL
     )
 
+    # 操作モードの設定
+    operation_mode = (
+        OperationMode.LANGCHAIN
+        if args.operation == "langchain"
+        else OperationMode.LANGGRAPH
+    )
+
     # サーバー名またはパスが指定されていない場合、必要に応じて要求
     if connection_mode == ConnectionMode.FULL and not (args.server or args.path):
         parser.error("Full connection mode requires --server or --path")
 
-    client = MCPClient(model_provider=args.model, connection_mode=connection_mode)
+    client = MCPClient(
+        model_provider=args.model,
+        connection_mode=connection_mode,
+        operation_mode=operation_mode,
+    )
+
     try:
         # データベース機能の初期化
         await client.initialize_database()
