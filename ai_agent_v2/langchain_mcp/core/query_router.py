@@ -60,29 +60,54 @@ class QueryRouter:
         - agent_type: 'github', 'database', 'notion', 'slack'
         - action: 実行するアクション
         - parameters: アクションに必要なパラメータ
+        - need_db_search: データベース検索が必要かどうか
+        - need_code_review: Githubコードレビューが必要かどうか
+        - create_task: Notionタスク作成が必要かどうか
         """
         # 基本的な応答構造
-        result = {"agent_type": "default", "action": "respond", "parameters": {}}
+        result = {
+            "agent_type": "default", 
+            "action": "respond", 
+            "parameters": {},
+            "need_db_search": False,
+            "need_code_review": False,
+            "create_task": False
+        }
 
         # テキスト内容から情報を抽出
-        # 実際の実装ではもっと堅牢な解析が必要
-        if "github" in analysis_text.lower():
+        # エージェントタイプの特定
+        if "github" in analysis_text.lower() or "コード" in analysis_text.lower() or "レビュー" in analysis_text.lower():
             result["agent_type"] = "github"
+            result["need_code_review"] = True
         elif (
             "データベース" in analysis_text.lower()
             or "database" in analysis_text.lower()
+            or "db" in analysis_text.lower()
+            or "ログ" in analysis_text.lower()
+            or "検索" in analysis_text.lower()
         ):
             result["agent_type"] = "database"
-        elif "notion" in analysis_text.lower() or "タスク" in analysis_text.lower():
+            result["need_db_search"] = True
+        elif "notion" in analysis_text.lower() or "タスク" in analysis_text.lower() or "作成" in analysis_text.lower():
             result["agent_type"] = "notion"
+            result["create_task"] = True
 
         # アクションの特定
-        if "検索" in analysis_text.lower() or "search" in analysis_text.lower():
+        if "検索" in analysis_text.lower() or "search" in analysis_text.lower() or "query" in analysis_text.lower():
             result["action"] = "search"
+            result["need_db_search"] = True
         elif "作成" in analysis_text.lower() or "create" in analysis_text.lower():
             result["action"] = "create"
         elif "更新" in analysis_text.lower() or "update" in analysis_text.lower():
             result["action"] = "update"
+        
+        # 問題の内容によってGithubコードレビューが必要かもしれない
+        if "エラー" in analysis_text.lower() or "バグ" in analysis_text.lower() or "不具合" in analysis_text.lower():
+            result["need_code_review"] = True
+            
+        # タスク作成が必要かどうか
+        if "修正" in analysis_text.lower() or "改善" in analysis_text.lower() or "対応" in analysis_text.lower():
+            result["create_task"] = True
 
         return result
 

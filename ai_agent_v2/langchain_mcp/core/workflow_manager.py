@@ -50,8 +50,7 @@ class WorkflowManager:
     def create_workflow_graph(self) -> StateGraph:
         """複数エージェント間の連携ワークフローをグラフとして定義する
 
-        ユーザークエリ → 分析 → 適切なエージェント → Slack応答
-                            └→ Notionタスク作成（必要な場合）
+        ユーザークエリ → 分析 → [DB/ログ検索(必要な場合)] → [Githubコードレビュー(必要な場合)] → 適切なエージェント → Notion作成(必要な場合) → Slack応答
 
         Returns:
             LangGraph StateGraph インスタンス
@@ -68,10 +67,31 @@ class WorkflowManager:
 
             return {"analysis": analysis, **state}
 
+        def search_database(state):
+            analysis = state["analysis"]
+            query = state["query"]
+            
+            # データベース検索の実装
+            # 実際の実装ではデータベースエージェントを呼び出す
+            
+            return {"db_search_results": "検索結果のダミーデータ", **state}
+        
+        def review_github_code(state):
+            analysis = state["analysis"]
+            query = state["query"]
+            
+            # Githubからコード取得とレビューの実装
+            # 実際の実装ではGithubエージェントを呼び出す
+            
+            return {"code_review_results": "コードレビュー結果のダミーデータ", **state}
+
         def route_to_agent(state):
             analysis = state["analysis"]
             query = state["query"]
+            db_results = state.get("db_search_results", None)
+            code_review = state.get("code_review_results", None)
 
+            # 検索結果やコードレビュー結果を含めて適切なエージェントに渡す
             route_future = asyncio.ensure_future(
                 self.query_router.route_to_agent(analysis, query)
             )
@@ -83,9 +103,20 @@ class WorkflowManager:
         def create_notion_task(state):
             # Notion タスク作成の処理（必要な場合）
             analysis = state["analysis"]
+            code_review = state.get("code_review_results", None)
+            db_results = state.get("db_search_results", None)
 
+            # 分析結果からタスク作成が必要と判断された場合
             if analysis.get("create_task", False):
                 # Notionタスク作成の実装
+                pass
+            # コードレビューで問題が見つかった場合
+            elif code_review and "問題" in code_review:
+                # 問題に関するタスク作成
+                pass
+            # DB検索結果で異常が検出された場合
+            elif db_results and ("異常" in db_results or "エラー" in db_results):
+                # 異常対応のタスク作成
                 pass
 
             return state
@@ -104,19 +135,60 @@ class WorkflowManager:
 
             return {"status": "complete", **state}
 
+        # 条件分岐のための関数
+        def should_search_database(state):
+            analysis = state["analysis"]
+            # DB検索が必要かどうかの条件判定
+            if analysis.get("need_db_search", False):
+                return "search_database"
+            # DB検索が不要の場合、Githubコードレビューが必要かどうか
+            if analysis.get("need_code_review", False):
+                return "review_github_code"
+            return "route_to_agent"
+            
+        def after_db_search(state):
+            analysis = state["analysis"]
+            # DB検索後にコードレビューが必要かどうかの条件判定
+            if analysis.get("need_code_review", False):
+                return "review_github_code"
+            return "route_to_agent"
+
         # ワークフローグラフの定義
         workflow = StateGraph(state_schema={"query": str})
 
         # ノードの追加
         workflow.add_node("analyze_query", analyze_query)
+        workflow.add_node("search_database", search_database)
+        workflow.add_node("review_github_code", review_github_code)
         workflow.add_node("route_to_agent", route_to_agent)
         workflow.add_node("create_notion_task", create_notion_task)
         workflow.add_node("send_slack_response", send_slack_response)
 
-        # エッジの追加
-        workflow.add_edge("analyze_query", "route_to_agent")
+        # 条件分岐エッジの追加
+        workflow.add_conditional_edges(
+            "analyze_query",
+            should_search_database,
+            {
+                "search_database": "search_database",
+                "review_github_code": "review_github_code",
+                "route_to_agent": "route_to_agent"
+            }
+        )
+        
+        workflow.add_conditional_edges(
+            "search_database",
+            after_db_search,
+            {
+                "review_github_code": "review_github_code",
+                "route_to_agent": "route_to_agent"
+            }
+        )
+        
+        workflow.add_edge("review_github_code", "route_to_agent")
+
+        # 固定エッジの追加
         workflow.add_edge("route_to_agent", "create_notion_task")
-        workflow.add_edge("create_notion_task", "send_slack_response")
+        workflow.add_edge("create_notion_task", "send_slack_response") 
         workflow.add_edge("send_slack_response", END)
 
         # スタートノードの設定
