@@ -13,7 +13,12 @@ from agents.db_agent import DBQueryAgent
 from agents.github_agent import GitHubResearchAgent
 from agents.notion_agent import NotionTaskAgent
 from agents.slack_agent import SlackResponseAgent
-from config import ANTHROPIC_MODEL_NAME, MODEL_TEMPERATURE, get_agent_prompts
+from config import (
+    ANTHROPIC_API_KEY,
+    ANTHROPIC_MODEL_NAME,
+    MODEL_TEMPERATURE,
+    get_agent_prompts,
+)
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
@@ -179,7 +184,7 @@ class GraphManager:
         self.llm = ChatAnthropic(
             model=ANTHROPIC_MODEL_NAME,
             temperature=MODEL_TEMPERATURE,
-            anthropic_api_key=None,  # 環境変数から自動読み込み
+            anthropic_api_key=ANTHROPIC_API_KEY,  # 環境変数から自動読み込み
         )
 
         # エージェントの初期化
@@ -291,6 +296,9 @@ class GraphManager:
         # ノードの追加
         for agent_type, agent_func in self.agents.items():
             builder.add_node(agent_type, agent_func)
+
+        # エントリーポイントの設定
+        builder.set_entry_point(AgentType.CONTROLLER.value)
 
         # エッジの定義
         # 1. コントローラーからの分岐

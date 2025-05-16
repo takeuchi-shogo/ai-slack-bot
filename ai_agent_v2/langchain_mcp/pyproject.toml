@@ -1,0 +1,31 @@
+[project]
+name = "langchain-mcp"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "anthropic>=0.51.0",
+    "langchain>=0.3.25",
+    "langchain-anthropic>=0.3.13",
+    "langchain-google-genai>=2.1.4",
+    "langchain-mcp-adapters>=0.0.11",
+    "langgraph>=0.4.3",
+    "mcp>=1.8.0",
+    "mysql-connector-python>=9.3.0",
+    "python-dotenv>=1.1.0",
+    "sqlalchemy>=2.0.40",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.15.0",
+    "ruff>=0.11.8",
+]
+
+[tool.mypy]
+strict = true
+disallow_any_unimported = true
+disallow_any_explicit = true
+warn_unreachable = true
+pretty = true

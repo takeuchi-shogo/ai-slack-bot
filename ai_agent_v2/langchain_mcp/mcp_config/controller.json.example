@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "notion": {
+      "command": "npx",
+      "args": ["-y", "@notionhq/notion-mcp-server"],
+      "env": {
+        "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer your_notion_token_here\", \"Notion-Version\": \"2022-06-28\" }"
+      }
+    },
+    "slack": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-slack"
+      ],
+      "env": {
+        "SLACK_BOT_TOKEN": "your_slack_bot_token_here",
+        "SLACK_TEAM_ID": "your_slack_team_id_here",
+        "SLACK_CHANNEL_IDS": "your_slack_channel_ids_here"
+      }
+    }
+  }
+}
