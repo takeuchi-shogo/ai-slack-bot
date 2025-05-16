@@ -1,3 +1,5 @@
 .venv
 
 /mcp_config/*.json
+
+__pycache__

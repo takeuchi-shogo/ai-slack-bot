@@ -1,0 +1,42 @@
+{
+  "mcpServers": {
+    "database": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-sql"
+      ],
+      "env": {
+        "DB_CONNECTION_STRING": "mysql://user:password@localhost:3306/database"
+      }
+    }
+  },
+  "dbType": "mysql",
+  "schema": "
+    users (
+      id INT PRIMARY KEY,
+      username VARCHAR(100),
+      email VARCHAR(255),
+      created_at TIMESTAMP
+    )
+    
+    posts (
+      id INT PRIMARY KEY,
+      user_id INT,
+      title VARCHAR(255),
+      content TEXT,
+      created_at TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+    
+    comments (
+      id INT PRIMARY KEY,
+      post_id INT,
+      user_id INT,
+      content TEXT,
+      created_at TIMESTAMP,
+      FOREIGN KEY (post_id) REFERENCES posts(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    )
+  "
+}

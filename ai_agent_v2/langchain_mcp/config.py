@@ -67,6 +67,12 @@ DB_USER = os.getenv("DB_USER", "root")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
 DB_NAME = os.getenv("DB_NAME", "default_db")
 
+# データベーススキーマの説明
+DB_SCHEMA_DESCRIPTION = """
+このデータベースには以下のテーブルとスキーマが含まれています。
+自然言語クエリからSQLを生成する際には、このスキーマ情報を参照してください。
+"""
+
 
 # データベース接続URL
 def get_db_url():
