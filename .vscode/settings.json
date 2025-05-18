@@ -5,11 +5,12 @@
       "source.fixAll": "explicit",
       "source.organizeImports": "explicit"
     },
-    "editor.defaultFormatter": "charliermarsh.ruff"
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.tabSize": 4,
   },
   "python.analysis.extraPaths": [
-    "/Users/takeuchishougo/dev-app/ai-agent/.venv/lib/python3.13/site-packages",
-    "/Users/takeuchishougo/dev-app/ai-agent/ai_agent_v2/mcp-client/.venv/lib/python3.13/site-packages",
+    "./agents/.venv/lib/python3.13/site-packages",
+    "./ai_agent_v2/mcp-client/.venv/lib/python3.13/site-packages",
   ],
   "python.analysis.inlayHints.functionReturnTypes": true,
   "python.analysis.inlayHints.variableTypes": true,

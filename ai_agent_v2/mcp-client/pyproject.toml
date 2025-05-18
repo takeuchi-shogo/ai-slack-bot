@@ -20,3 +20,51 @@ dependencies = [
     "mysql-connector-python>=9.3.0",
     "langgraph>=0.4.3",
 ]
+
+[tool.black]
+target-version = ['py311']
+line-length = 80
+
+[tool.isort]
+line_length = 80
+multi_line_output = 3
+include_trailing_comma = true
+ensure_newline_before_comments = true
+use_parentheses = true
+
+[tool.ruff]
+line-length = 88
+ignore = []
+select = ["ALL"]
+
+# ファイルごとのエラー除外
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.ruff.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint]
+# チェックするエラーの種類
+select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "B",  # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+# 除外するエラーの種類
+ignore = [
+    "E501",  # line too long, handled by black
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+    "W191",  # indentation contains tabs
+    "B904", # raise ... from ... になっていない場合のエラーを無視
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8.6",
+]
