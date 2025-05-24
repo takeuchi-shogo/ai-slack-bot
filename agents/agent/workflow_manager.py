@@ -2,12 +2,14 @@ import asyncio
 import logging
 from typing import Any, Dict
 
+from langchain_core.messages import HumanMessage
+from langgraph.graph import END, START, StateGraph
+
 from agent.code_review import CodeReviewAgent
 from agent.database import DatabaseAgent
 from agent.log import LogAgent
 from agent.state import Message, State
 from agent.user_proxy import UserProxyAgent
-from langgraph.graph import END, START, StateGraph
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +54,10 @@ class WorkflowManager:
             agent_response = asyncio.run(user_proxy_agent.execute(state.query))
             logger.info(f"analyze_query: {agent_response}")
             state.messages.append(
-                Message(agent_name="user_proxy", message=agent_response["content"])
+                Message(
+                    agent_name="user_proxy",
+                    message=HumanMessage(content=agent_response["content"]),
+                )
             )
             state.is_need_data = agent_response["is_need_data"]
             return state
@@ -61,7 +66,16 @@ class WorkflowManager:
             """
             データの取得が必須なので、DB検索、ログ検索を並行して行う
             """
-            pass
+            database_agent = DatabaseAgent()
+            agent_response = asyncio.run(database_agent.execute(state.query, state))
+            logger.info(f"need_search_data: {agent_response}")
+            state.messages.append(
+                Message(
+                    agent_name="database",
+                    message=HumanMessage(content=agent_response["response"]),
+                )
+            )
+            return state
 
         def review_github_code(state: State):
             """
@@ -111,5 +125,4 @@ class WorkflowManager:
         # 3.Slack応答後のエッジの追加
         workflow.add_edge("slack_response", END)
 
-        return workflow.compile()
         return workflow.compile()
