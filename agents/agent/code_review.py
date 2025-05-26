@@ -1,10 +1,11 @@
 import logging
 
-from agent.state import State
 from config.prompt import GITHUB_RESEARCH_SYSTEM_PROMPT
 from langgraph.prebuilt import create_react_agent
 from models.gemini import GeminiModelHandler
 from tools.mcp_client import MCPClient
+
+from agent.state import State
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class CodeReviewAgent:
         Stateに格納されているDB情報、ログ情報を元に該当する怪しい箇所のコードをレビューする
         レビュー結果はStateに格納する
         """
-        github_tools = self.mcp_client.get_github_tools()
+        github_tools = await self.mcp_client.get_github_tools()
         agent = create_react_agent(self.model_handler.llm, github_tools, verbose=True)
 
         # Stateから必要な情報を抽出してプロンプトを構築

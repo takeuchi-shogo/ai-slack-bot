@@ -23,13 +23,52 @@ class OpenAIModelHandler:
     MODEL_NAME = "OpenAI"  # モデル名をクラス変数として定義
 
     def __init__(self):
-        self.llm = ChatOpenAI(
-            model=OPENAI_MODEL_NAME,
-            temperature=MODEL_TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-            openai_api_key=OPENAI_API_KEY,
-            # request_timeout=60, # 必要に応じてタイムアウトを設定 (例: 60秒)
-        )
+        self._llm = None
+        self._initialized = False
+
+    @property
+    def llm(self):
+        """遅延初期化でChatOpenAIインスタンスを取得"""
+        if not self._initialized:
+            self._llm = ChatOpenAI(
+                model=OPENAI_MODEL_NAME,
+                temperature=MODEL_TEMPERATURE,
+                max_tokens=MAX_TOKENS,
+                openai_api_key=OPENAI_API_KEY,
+                # request_timeout=60, # 必要に応じてタイムアウトを設定 (例: 60秒)
+            )
+            self._initialized = True
+        return self._llm
+
+    async def aclose(self):
+        """HTTPクライアントを適切に閉じる"""
+        if (
+            self._llm
+            and hasattr(self._llm, "client")
+            and hasattr(self._llm.client, "close")
+        ):
+            try:
+                if hasattr(self._llm.client, "aclose"):
+                    await self._llm.client.aclose()
+                else:
+                    self._llm.client.close()
+                logger.info(f"{self.MODEL_NAME} HTTPクライアントを正常に閉じました")
+            except Exception as e:
+                logger.warning(
+                    f"{self.MODEL_NAME} HTTPクライアントのクローズ中にエラー: {str(e)}"
+                )
+        self._llm = None
+        self._initialized = False
+
+    def __del__(self):
+        """デストラクタでのクリーンアップ（フォールバック）"""
+        if self._llm:
+            try:
+                # 同期的なクリーンアップのみ実行
+                if hasattr(self._llm, "client") and hasattr(self._llm.client, "close"):
+                    self._llm.client.close()
+            except Exception:
+                pass  # デストラクタでは例外を無視
 
     async def invoke_llm(self, messages: list) -> dict:
         """
