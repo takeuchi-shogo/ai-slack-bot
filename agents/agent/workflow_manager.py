@@ -84,6 +84,12 @@ class WorkflowManager:
                 state.is_need_data = False
             return state
 
+        async def log_search(state: State):
+            """
+            ログを検索する
+            """
+            pass
+
         async def generate_sql(state: State):
             """
             自然言語クエリからSQLを生成する
@@ -280,6 +286,7 @@ class WorkflowManager:
 
         # ワークフローの各ノードを定義
         workflow.add_node("analyze_query", analyze_query)
+        workflow.add_node("log_search", log_search)
         workflow.add_node("generate_sql", generate_sql)
         workflow.add_node("confirm_sql", confirm_sql)
         workflow.add_node("execute_sql", execute_sql)
@@ -287,12 +294,23 @@ class WorkflowManager:
         workflow.add_node("slack_response", slack_response)
 
         # 1. analyze_query → generate_sql または slack_response
+        # analyze_queryから必要があれば並列でlog_searchとgenerate_sqlを実行
         workflow.add_conditional_edges(
             "analyze_query",
             lambda state: getattr(state, "is_need_data", False),
             {
                 True: "generate_sql",
                 False: "slack_response",
+            },
+        )
+
+        # 1.1 analyze_queryから必要があれば並列でlog_searchを実行
+        workflow.add_conditional_edges(
+            "analyze_query",
+            lambda state: getattr(state, "is_need_log", False),
+            {
+                True: "log_search",
+                False: "generate_sql",
             },
         )
 

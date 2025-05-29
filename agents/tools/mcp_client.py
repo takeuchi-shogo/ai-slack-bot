@@ -14,6 +14,8 @@ class MCPClient:
     def __init__(self):
         self.github = None
         self.slack = None
+        self.sentry = None
+        self.datadog = None
         self._initialized = False
 
     async def _ensure_initialized(self):
@@ -22,6 +24,8 @@ class MCPClient:
             try:
                 self.github = await self.initialize_github()
                 self.slack = await self.initialize_slack()
+                self.datadog = await self.initialize_datadog()
+                self.sentry = await self.initialize_sentry()
                 self._initialized = True
                 logger.info("MCPClient初期化完了")
             except Exception as e:
@@ -40,6 +44,16 @@ class MCPClient:
         """Slackツールを取得"""
         await self._ensure_initialized()
         return self.slack
+
+    async def get_sentry_tools(self):
+        """Sentryツールを取得"""
+        await self._ensure_initialized()
+        return self.sentry
+
+    async def get_datadog_tools(self):
+        """Datadogツールを取得"""
+        await self._ensure_initialized()
+        return self.datadog
 
     async def initialize_github(self):
         """
@@ -73,4 +87,38 @@ class MCPClient:
             return tools
         except Exception as e:
             logger.error(f"Slack MCP初期化エラー: {e}")
+            return []
+
+    async def initialize_sentry(self):
+        """
+        SentryのMCPクライアントを初期化する
+        """
+        try:
+            with open("tools/schema/sentry.json", "r") as f:
+                mcp_config = json.load(f)
+
+            # コンテキストマネージャを使わない
+            client = MultiServerMCPClient(mcp_config["mcpServers"])
+            # 直接ツールを取得
+            tools = await client.get_tools()
+            return tools
+        except Exception as e:
+            logger.error(f"Sentry MCP初期化エラー: {e}")
+            return []
+
+    async def initialize_datadog(self):
+        """
+        DatadogのMCPクライアントを初期化する
+        """
+        try:
+            with open("tools/schema/datadog.json", "r") as f:
+                mcp_config = json.load(f)
+
+            # コンテキストマネージャを使わない
+            client = MultiServerMCPClient(mcp_config["mcpServers"])
+            # 直接ツールを取得
+            tools = await client.get_tools()
+            return tools
+        except Exception as e:
+            logger.error(f"Datadog MCP初期化エラー: {e}")
             return []
