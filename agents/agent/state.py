@@ -20,6 +20,10 @@ class State(BaseModel):
     is_need_data: bool = Field(
         default=False, description="DBなど他のエージェントからのデータが必要かのフラグ"
     )
+    """ロガーからのデータが必要かのフラグ"""
+    is_need_log: bool = Field(
+        default=False, description="ロガーからのデータが必要かのフラグ"
+    )
     """データベースのSQLクエリ"""
     sql_query: str = Field(default="", description="データベースのSQLクエリ")
     """生成されたSQLクエリ（確認前）"""
