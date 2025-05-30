@@ -63,6 +63,9 @@ class WorkflowManager:
                         )
                     )
                     state.is_need_data = agent_response.get("is_need_data", False)
+                    # is_need_log も設定 (エラー時はFalseを想定)
+                    state.is_need_log = agent_response.get("is_need_log", False)
+
                 else:
                     state.messages.append(
                         Message(
@@ -71,6 +74,11 @@ class WorkflowManager:
                         )
                     )
                     state.is_need_data = agent_response["is_need_data"]
+                    # is_need_log も設定
+                    state.is_need_log = agent_response[
+                        "is_need_log"
+                    ]  # UserProxyAgentの応答にis_need_logが含まれることを想定
+
             except Exception as e:
                 logger.error(f"analyze_query error: {type(e).__name__}: {str(e)}")
                 state.messages.append(
@@ -82,6 +90,46 @@ class WorkflowManager:
                     )
                 )
                 state.is_need_data = False
+                state.is_need_log = False  # エラー時はFalse
+            return state
+
+        async def log_search(state: State):
+            """
+            ログを検索する
+            """
+            try:
+                log_agent = LogAgent()
+                # LogAgentのexecuteメソッドを呼び出すと仮定
+                # 実際の引数はLogAgentの実装に合わせる必要があります
+                agent_response = await log_agent.execute(
+                    state.query, state
+                )  # stateを渡すなど、必要に応じて変更
+                logger.info(f"log_search: {agent_response}")
+
+                # 応答をStateに保存 (例)
+                state.log_search_result = agent_response.get("response")
+                state.messages.append(
+                    Message(
+                        agent_name="log_search",
+                        # 応答の形式に合わせて調整
+                        message=HumanMessage(
+                            content=agent_response.get(
+                                "response",
+                                "ログ検索を実行しました。結果は別途確認してください。",
+                            )
+                        ),
+                    )
+                )
+            except Exception as e:
+                logger.error(f"log_search error: {type(e).__name__}: {str(e)}")
+                state.messages.append(
+                    Message(
+                        agent_name="log_search_error",
+                        message=HumanMessage(
+                            content=f"ログ検索中にエラーが発生しました: {str(e)}"
+                        ),
+                    )
+                )
             return state
 
         async def generate_sql(state: State):
@@ -106,6 +154,8 @@ class WorkflowManager:
                             ),
                         )
                     )
+                    # SQLが生成されたら確認が必要（要件に応じて変更）
+                    state.sql_confirmation_needed = True
                 else:
                     state.messages.append(
                         Message(
@@ -128,6 +178,17 @@ class WorkflowManager:
                 )
                 state.sql_confirmation_needed = False
             return state
+
+        def decide_after_parallel_tasks(state: State):
+            """
+            log_search と generate_sql の並列実行後、次の遷移先を決定する。
+            generate_sqlの結果に基づいてconfirm_sqlかslack_responseに分岐する。
+            """
+            if getattr(state, "sql_confirmation_needed", False) and bool(
+                getattr(state, "generated_sql", "")
+            ):
+                return "confirm_sql"
+            return "slack_response"
 
         def confirm_sql(state: State):
             """
@@ -280,34 +341,66 @@ class WorkflowManager:
 
         # ワークフローの各ノードを定義
         workflow.add_node("analyze_query", analyze_query)
+        workflow.add_node("log_search", log_search)  # log_search ノードを追加
         workflow.add_node("generate_sql", generate_sql)
+        # 並列実行後の意思決定ノード
+        workflow.add_node("decide_after_parallel_tasks", decide_after_parallel_tasks)
         workflow.add_node("confirm_sql", confirm_sql)
         workflow.add_node("execute_sql", execute_sql)
         workflow.add_node("review_github_code", review_github_code)
         workflow.add_node("slack_response", slack_response)
 
-        # 1. analyze_query → generate_sql または slack_response
+        # 1. analyze_query からの分岐
+        # is_need_data と is_need_log の両方が True の場合は並列実行ノードへ
+        # is_need_data のみ True の場合は generate_sql へ (log_search は不要なケース)
+        # is_need_log のみ True の場合は log_search へ (generate_sql は不要なケース)
+        # 両方 False の場合は slack_response へ
+        def decide_after_analyze(state: State):
+            need_data = getattr(state, "is_need_data", False)
+            need_log = getattr(
+                state, "is_need_log", False
+            )  # analyze_queryでis_need_logが設定される想定
+
+            if need_data and need_log:
+                return "parallel_data_log_tasks"  # 新しい並列実行用の分岐名
+            elif need_data:
+                return "generate_sql_only"
+            elif need_log:
+                return "log_search_only"
+            else:
+                return "slack_response"
+
         workflow.add_conditional_edges(
             "analyze_query",
-            lambda state: getattr(state, "is_need_data", False),
+            decide_after_analyze,
             {
-                True: "generate_sql",
-                False: "slack_response",
+                "parallel_data_log_tasks": ["log_search", "generate_sql"],  # 並列実行
+                "generate_sql_only": "generate_sql",
+                "log_search_only": "log_search",
+                "slack_response": "slack_response",
             },
         )
 
-        # 2. generate_sql → confirm_sql または slack_response
+        # 2. log_searchから (単独実行された場合) → decide_after_parallel_tasks (合流点)
+        # log_searchの結果をどう扱うかによって、この後の遷移は変わります。
+        # ここでは単純にdecide_after_parallel_tasksに繋げていますが、
+        # 例えばlog_searchの結果もSQL生成に影響する場合などは、generate_sqlに繋げる等の変更が必要です。
+        workflow.add_edge("log_search", "decide_after_parallel_tasks")
+
+        # 3. generate_sqlから (単独実行または並列実行後) → decide_after_parallel_tasks (合流点)
+        workflow.add_edge("generate_sql", "decide_after_parallel_tasks")
+
+        # 4. 並列実行後の意思決定ノードからの分岐
         workflow.add_conditional_edges(
-            "generate_sql",
-            lambda state: getattr(state, "sql_confirmation_needed", False)
-            and bool(getattr(state, "generated_sql", "")),
+            "decide_after_parallel_tasks",
+            decide_after_parallel_tasks,  # 上で定義した関数を使用
             {
-                True: "confirm_sql",
-                False: "slack_response",  # SQLが生成されなかった場合はslack_responseへ
+                "confirm_sql": "confirm_sql",
+                "slack_response": "slack_response",
             },
         )
 
-        # 3. confirm_sql → execute_sql または slack_response
+        # 5. confirm_sql → execute_sql または slack_response
         workflow.add_conditional_edges(
             "confirm_sql",
             lambda state: getattr(state, "sql_confirmed", False),
@@ -317,7 +410,7 @@ class WorkflowManager:
             },
         )
 
-        # 4. execute_sql → review_github_code または slack_response
+        # 6. execute_sql → review_github_code または slack_response
         workflow.add_conditional_edges(
             "execute_sql",
             lambda state: getattr(state, "is_need_code_review", False),
@@ -327,10 +420,10 @@ class WorkflowManager:
             },
         )
 
-        # 5. review_github_code → slack_response
+        # 7. review_github_code → slack_response
         workflow.add_edge("review_github_code", "slack_response")
 
-        # 6. slack_response → END
+        # 8. slack_response → END
         workflow.add_edge("slack_response", END)
 
         return workflow.compile()
